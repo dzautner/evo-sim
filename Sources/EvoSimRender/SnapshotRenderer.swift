@@ -21,12 +21,19 @@ public struct SnapshotRenderer {
     public var cellRadiusPx: Float
     public var drawBonds: Bool = true
     public enum ColorMode { case uniform, organism, role }
-    /// `.role`: cells colored by their dominant NCA output channel —
-    ///   red = predator, orange = motor, cyan = divider, green = structure.
-    ///   Visualises emergent "organs" inside organisms.
-    /// `.organism`: hash(organismId) → hue. Visualises distinct lineages.
+    /// `.role`: cells colored by their dominant NCA output channel.
+    /// `.organism`: hash(organismId) → hue.
     /// `.uniform`: amber/white.
     public var colorMode: ColorMode = .role
+    /// When true, cells render as a smooth metaball isosurface — overlapping
+    /// cells merge into one blob with a defined silhouette, so an organism
+    /// reads as a CREATURE instead of a cell cloud. Slower than splat dots.
+    public var metaballMode: Bool = true
+    /// Influence radius in world units (not pixels). Larger = blobbier.
+    public var metaballRadius: Float = 1.8
+    /// Pixel size of one world unit when metaballMode is on; tuned by render
+    /// size relative to world bounds.
+    public var metaballThreshold: Float = 0.5
     /// Optional motion trail: oldest → newest frames of (cellId, position).
     /// Rendered behind cells as fading dots so locomotion shows in a still.
     public var trailFrames: [[(UInt32, SIMD3<Float>)]] = []
@@ -193,6 +200,176 @@ public struct SnapshotRenderer {
         for (i, c) in world.colony.cells.enumerated() {
             roleP[c.id] = world.colony.predation.indices.contains(i) ? world.colony.predation[i] : 0
             roleC[c.id] = world.colony.contraction.indices.contains(i) ? world.colony.contraction[i] : 0
+        }
+
+        if metaballMode {
+            // True metaball pass: per pixel, accumulate Σ rᵢ²/dᵢ² from cells
+            // and threshold to produce a smooth blobby silhouette. Color and
+            // shading sampled from the dominant nearby cell (with depth +
+            // role mixing). Two pixels of soft-edge transition give the
+            // "membrane glow" look.
+            let worldExtentXY = SIMD2<Float>(Float(nx) * cf.cellSize, Float(ny) * cf.cellSize)
+            let worldPerPxX = worldExtentXY.x / Float(w)
+            let worldPerPxY = worldExtentXY.y / Float(h)
+            let rWorld = metaballRadius
+            let r2 = rWorld * rWorld
+            // Influence radius in pixels (for the inner-loop bounding box).
+            let influencePx = Int((rWorld / worldPerPxX).rounded(.up)) + 1
+
+            // Pre-project all cells to pixel space for fast inner loop.
+            struct ProjCell { var px: Float; var py: Float; var z: Float; var color: SIMD3<Float>; var energy: Float }
+            var projected: [ProjCell] = []
+            projected.reserveCapacity(world.colony.cells.count)
+            for cell in world.colony.cells {
+                let p = cell.position
+                let zNorm = max(0, min(1, p.z / tankZ))
+                let depthBright: Float = 0.55 + 0.45 * zNorm
+                let energyHeat = 1.0 - expf(-cell.energy * 0.5)
+                let col: SIMD3<Float>
+                switch colorMode {
+                case .role:
+                    let pSig = max(0, roleP[cell.id] ?? 0)
+                    let mSig = max(0, roleC[cell.id] ?? 0)
+                    let predatorCol = SIMD3<Float>(1.0, 0.18, 0.18)
+                    let motorCol    = SIMD3<Float>(1.0, 0.55, 0.10)
+                    let structCol   = SIMD3<Float>(0.45, 0.95, 0.55)
+                    let pw = min(1, pSig * 1.6), mw = min(1, mSig * 1.6)
+                    let totalW = pw + mw
+                    var base: SIMD3<Float>
+                    if totalW < 0.05 {
+                        base = structCol
+                    } else {
+                        let pn = pw / max(0.001, totalW)
+                        let mn = mw / max(0.001, totalW)
+                        let active = predatorCol * pn + motorCol * mn
+                        base = mix(structCol, active, t: min(1, totalW))
+                    }
+                    col = base * depthBright
+                case .organism:
+                    let hue = organismHue(cell.organismId)
+                    col = hsvToRgb(h: hue, s: 0.85, v: 1.0) * depthBright
+                case .uniform:
+                    col = SIMD3<Float>(1.0, 0.55, 0.25) * depthBright
+                }
+                projected.append(ProjCell(
+                    px: p.x / worldPerPxX,
+                    py: p.y / worldPerPxY,
+                    z: p.z, color: col, energy: energyHeat
+                ))
+            }
+
+            // Spatial bin cells by pixel grid for fast lookup.
+            let binsX = max(1, w / max(1, influencePx * 2))
+            let binsY = max(1, h / max(1, influencePx * 2))
+            let binW = Float(w) / Float(binsX)
+            let binH = Float(h) / Float(binsY)
+            var bins = [[Int]](repeating: [], count: binsX * binsY)
+            for (i, c) in projected.enumerated() {
+                let bx = max(0, min(binsX - 1, Int(c.px / binW)))
+                let by = max(0, min(binsY - 1, Int(c.py / binH)))
+                bins[bx + by * binsX].append(i)
+            }
+            let binSpan = max(1, Int((Float(influencePx) / min(binW, binH)).rounded(.up)) + 1)
+
+            // Per-pixel field accumulation.
+            for py in 0..<h {
+                let bypx = py
+                let by = max(0, min(binsY - 1, Int(Float(bypx) / binH)))
+                let by0 = max(0, by - binSpan), by1 = min(binsY - 1, by + binSpan)
+                for px in 0..<w {
+                    let bx = max(0, min(binsX - 1, Int(Float(px) / binW)))
+                    let bx0 = max(0, bx - binSpan), bx1 = min(binsX - 1, bx + binSpan)
+
+                    var field: Float = 0
+                    var bestW: Float = 0
+                    var bestColor = SIMD3<Float>(0, 0, 0)
+                    var bestEnergy: Float = 0
+                    let qx = Float(px), qy = Float(py)
+                    // Convert influence radius from world to pixel space.
+                    let influencePxF = rWorld / worldPerPxX
+                    let influencePxF2 = influencePxF * influencePxF
+
+                    for bj in by0...by1 {
+                        for bi in bx0...bx1 {
+                            for ci in bins[bi + bj * binsX] {
+                                let c = projected[ci]
+                                let dx = c.px - qx
+                                let dy = c.py - qy
+                                let d2 = dx * dx + dy * dy
+                                if d2 > influencePxF2 { continue }
+                                // Quadratic falloff metaball kernel.
+                                // 1 - (d/r)² gives smooth peak at center.
+                                let f = max(0, 1 - d2 / influencePxF2)
+                                let wgt = f * f
+                                field += wgt
+                                if wgt > bestW {
+                                    bestW = wgt
+                                    bestColor = c.color
+                                    bestEnergy = c.energy
+                                }
+                            }
+                        }
+                    }
+                    _ = r2
+
+                    if field > metaballThreshold {
+                        // Inside the isosurface — solid color with a hint of
+                        // central highlight from accumulated field strength.
+                        let surface: Float = (field - metaballThreshold) / max(0.001, 1.5 - metaballThreshold)
+                        let bright = min(1, 0.6 + surface * 0.7) * (0.85 + 0.25 * bestEnergy)
+                        let outCol = bestColor * bright
+                        let n = 4 * (px + py * w)
+                        let r = Float(pixels[n + 0]) / 255
+                        let g = Float(pixels[n + 1]) / 255
+                        let b = Float(pixels[n + 2]) / 255
+                        let alpha: Float = min(1, 0.55 + surface * 0.45)
+                        pixels[n + 0] = toByte(r * (1 - alpha) + outCol.x * alpha)
+                        pixels[n + 1] = toByte(g * (1 - alpha) + outCol.y * alpha)
+                        pixels[n + 2] = toByte(b * (1 - alpha) + outCol.z * alpha)
+                    } else if field > metaballThreshold * 0.5 {
+                        // Outer membrane glow / soft edge.
+                        let edge = (field - metaballThreshold * 0.5) / (metaballThreshold * 0.5)
+                        let alpha: Float = edge * 0.35
+                        let outCol = bestColor * 0.7
+                        let n = 4 * (px + py * w)
+                        let r = Float(pixels[n + 0]) / 255
+                        let g = Float(pixels[n + 1]) / 255
+                        let b = Float(pixels[n + 2]) / 255
+                        pixels[n + 0] = toByte(r * (1 - alpha) + outCol.x * alpha)
+                        pixels[n + 1] = toByte(g * (1 - alpha) + outCol.y * alpha)
+                        pixels[n + 2] = toByte(b * (1 - alpha) + outCol.z * alpha)
+                    }
+                }
+            }
+
+            // Predation flashes still draw over.
+            for ev in world.colony.recentPredations {
+                let ageT = Float(ev.age) / Float(max(1, world.colony.predationEventLifetime))
+                let alpha = max(0, 0.85 * (1 - ageT))
+                let pa = SIMD2<Float>(ev.predator.x * pxPerUnit.x, ev.predator.y * pxPerUnit.y)
+                let pb = SIMD2<Float>(ev.prey.x * pxPerUnit.x, ev.prey.y * pxPerUnit.y)
+                drawLine(into: &pixels, w: w, h: h,
+                         x0: pa.x, y0: pa.y, x1: pb.x, y1: pb.y,
+                         color: SIMD3<Float>(1.0, 0.3, 0.2), alpha: alpha)
+            }
+
+            // Vignette.
+            let cx = Float(w) * 0.5, cy = Float(h) * 0.5
+            let maxR = sqrt(cx * cx + cy * cy)
+            for py in 0..<h {
+                for px in 0..<w {
+                    let dx = Float(px) - cx
+                    let dy = Float(py) - cy
+                    let r = sqrt(dx * dx + dy * dy) / maxR
+                    let vignette = 1 - r * r * 0.45
+                    let n = 4 * (px + py * w)
+                    pixels[n + 0] = toByte(Float(pixels[n + 0]) / 255 * vignette)
+                    pixels[n + 1] = toByte(Float(pixels[n + 1]) / 255 * vignette)
+                    pixels[n + 2] = toByte(Float(pixels[n + 2]) / 255 * vignette)
+                }
+            }
+
+            return pixels
         }
 
         var sortedCells = world.colony.cells
