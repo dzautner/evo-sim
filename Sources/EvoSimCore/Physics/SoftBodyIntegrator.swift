@@ -8,15 +8,15 @@ import simd
 /// All cells have unit mass. Per-cell drag and boundary repulsion are
 /// physical constants (medium viscosity, tank walls), not evolved traits.
 public struct SoftBodyIntegrator {
-    public var drag: Float = 1.8           // viscous medium
+    public var drag: Float = 0.9           // viscous medium (lower = creatures swim further per contraction)
     public var boundaryStiffness: Float = 6.0
     public var maxVelocity: Float = 8.0    // clamp for stability
     public var breakStretchRatio: Float = 3.5
     /// Max fractional contraction of a bond at full +1 contraction signal
-    /// from both endpoints. Bound by physics — myocytes contract ~30%, but
-    /// we push higher (55%) so coordinated motion is reachable within tens
-    /// of generations rather than thousands.
-    public var maxContractionFraction: Float = 0.55
+    /// from both endpoints. Pushed higher than biology (myocytes ≈ 30%) so
+    /// coordinated locomotion is reachable in tens of generations rather
+    /// than thousands.
+    public var maxContractionFraction: Float = 0.75
 
     public init() {}
 
