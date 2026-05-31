@@ -5,13 +5,6 @@ import UniformTypeIdentifiers
 import simd
 import EvoSimCore
 
-/// Draws each cell as actual cell anatomy: dark membrane outline, mid-tone
-/// grainy cytoplasm fill, small bright off-center nucleus. Reads as
-/// "microscopy" because that's literally what microscopy looks like.
-///
-/// Pure 2D z-sorted painter, no SDF, no bin artifacts ever. Background is
-/// a pale watery wash with gentle fBm noise. Cells are translucent so
-/// stacked cells in 3D show through.
 /// Mutable camera state shared across frame renders so a GIF / live app
 /// can smoothly interpolate viewport changes (no jumpy zoom).
 public final class MicroscopeCamera {
@@ -25,30 +18,26 @@ public final class MicroscopeCamera {
     public init() {}
 }
 
+/// Renders the world to look like a transmission electron micrograph: pale
+/// warm-grey background with film grain + dust, organisms as DARK
+/// electron-dense bodies with a single thin membrane outline and internal
+/// organelles (nuclei, vacuoles) visible through translucent cytoplasm.
+///
+/// Crucially: each organism is rendered as ONE body, not a stack of
+/// individual cells. The body shape is a metaball isosurface over that
+/// organism's cells, so a 30-cell organism reads as a single creature with
+/// 30 internal structures, not as 30 dots that happen to be near each other.
 public struct MicroscopyRenderer {
     public var width: Int
     public var height: Int
-    /// Optional persistent camera — pass the SAME instance across frames
-    /// to get smooth tracking. nil = fresh viewport per render.
+    /// Optional persistent camera.
     public var camera: MicroscopeCamera? = nil
-    /// Cell visual radius in world units. Larger ⇒ cells fill more of the
-    /// frame and you can see their nucleus.
-    public var cellRadius: Float = 2.4
-    /// Membrane thickness as a fraction of the cell radius.
-    public var membraneFrac: Float = 0.18
-    /// Nucleus radius as a fraction of the cell radius.
-    public var nucleusFrac: Float = 0.28
-    /// Cytoplasm noise scale (world units).
-    public var cytoNoiseScale: Float = 0.6
-    /// When true, the camera frames the largest organism (by cell count)
-    /// plus padding, so the rendered image is creature-centric rather than
-    /// tank-overview. When false, the whole tank is shown.
+    /// Per-cell radius in world units used by the metaball envelope.
+    public var cellRadius: Float = 1.6
+    /// Frame the largest organism instead of the whole tank.
     public var followLargestOrganism: Bool = false
-    /// Padding around the followed organism, in world units.
-    public var followPadding: Float = 6.0
-    /// Minimum framed extent in world units (avoid extreme zoom on a
-    /// single-cell organism).
-    public var minFrameExtent: Float = 14.0
+    public var followPadding: Float = 8.0
+    public var minFrameExtent: Float = 18.0
 
     public init(width: Int = 480, height: Int = 480) {
         self.width = width
@@ -67,55 +56,35 @@ public struct MicroscopyRenderer {
 
         let bx = world.bounds.x, by = world.bounds.y, bz = world.bounds.z
 
-        // Camera viewport: either full tank, or a tight frame around the
-        // largest organism. viewMinX/Y, viewExtentX/Y are in world units.
+        // ---------------- Camera viewport ----------------
         var viewMinX: Float = 0, viewMinY: Float = 0
         var viewExtentX: Float = bx, viewExtentY: Float = by
         if followLargestOrganism, !world.colony.cells.isEmpty {
-            // Count cells per organism, pick the most populous.
             var counts: [UInt32: Int] = [:]
-            for c in world.colony.cells {
-                counts[c.organismId, default: 0] += 1
-            }
+            for c in world.colony.cells { counts[c.organismId, default: 0] += 1 }
             if let (bestOid, _) = counts.max(by: { $0.value < $1.value }) {
-                var minP = SIMD2<Float>( Float.greatestFiniteMagnitude,  Float.greatestFiniteMagnitude)
+                var minP = SIMD2<Float>(.greatestFiniteMagnitude, .greatestFiniteMagnitude)
                 var maxP = SIMD2<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
                 for c in world.colony.cells where c.organismId == bestOid {
-                    minP.x = min(minP.x, c.position.x)
-                    minP.y = min(minP.y, c.position.y)
-                    maxP.x = max(maxP.x, c.position.x)
-                    maxP.y = max(maxP.y, c.position.y)
+                    minP.x = min(minP.x, c.position.x); minP.y = min(minP.y, c.position.y)
+                    maxP.x = max(maxP.x, c.position.x); maxP.y = max(maxP.y, c.position.y)
                 }
-                // Pad + enforce minimum extent + square aspect.
-                let extentXraw = (maxP.x - minP.x) + followPadding * 2
-                let extentYraw = (maxP.y - minP.y) + followPadding * 2
-                let side = max(minFrameExtent, max(extentXraw, extentYraw))
-                let cx = (minP.x + maxP.x) * 0.5
-                let cy = (minP.y + maxP.y) * 0.5
-                var targetMinX = cx - side * 0.5
-                var targetMinY = cy - side * 0.5
-                var targetExtent = side
-
+                let side = max(minFrameExtent, max((maxP.x - minP.x), (maxP.y - minP.y)) + followPadding * 2)
+                let cx = (minP.x + maxP.x) * 0.5, cy = (minP.y + maxP.y) * 0.5
+                var tMinX = cx - side * 0.5, tMinY = cy - side * 0.5, tExt = side
                 if let cam = camera {
                     if !cam.initialized {
-                        cam.minX = targetMinX
-                        cam.minY = targetMinY
-                        cam.extent = targetExtent
-                        cam.initialized = true
+                        cam.minX = tMinX; cam.minY = tMinY; cam.extent = tExt; cam.initialized = true
                     } else {
                         let s = max(0, min(0.99, cam.smoothing))
-                        cam.minX = cam.minX * s + targetMinX * (1 - s)
-                        cam.minY = cam.minY * s + targetMinY * (1 - s)
-                        cam.extent = cam.extent * s + targetExtent * (1 - s)
+                        cam.minX = cam.minX * s + tMinX * (1 - s)
+                        cam.minY = cam.minY * s + tMinY * (1 - s)
+                        cam.extent = cam.extent * s + tExt * (1 - s)
                     }
-                    targetMinX = cam.minX
-                    targetMinY = cam.minY
-                    targetExtent = cam.extent
+                    tMinX = cam.minX; tMinY = cam.minY; tExt = cam.extent
                 }
-                viewMinX = targetMinX
-                viewMinY = targetMinY
-                viewExtentX = targetExtent
-                viewExtentY = targetExtent
+                viewMinX = tMinX; viewMinY = tMinY
+                viewExtentX = tExt; viewExtentY = tExt
             }
         }
         let pxPerUnitX = Float(w) / viewExtentX
@@ -123,22 +92,20 @@ public struct MicroscopyRenderer {
         @inline(__always) func wx2px(_ wx: Float) -> Float { (wx - viewMinX) * pxPerUnitX }
         @inline(__always) func wy2py(_ wy: Float) -> Float { (wy - viewMinY) * pxPerUnitY }
 
-        // -----------------------------------------------------------------
-        // Background: pale watery wash with subtle fBm so it doesn't look
-        // like flat plastic. Colour: dim cool blue/grey, like a slide.
-        // -----------------------------------------------------------------
-        let bgBase = SIMD3<Float>(0.085, 0.105, 0.115)
-        let bgWash = SIMD3<Float>(0.115, 0.135, 0.140)
+        // ---------------- TEM background ----------------
+        // Pale warm-ivory, with heavy fBm "film" grain and a slight
+        // sepia tint variation across the frame.
+        let bgPale = SIMD3<Float>(0.84, 0.81, 0.76)
+        let bgShadow = SIMD3<Float>(0.70, 0.66, 0.60)
         for py in 0..<h {
             for px in 0..<w {
                 let u = Float(px) / Float(w)
                 let v = Float(py) / Float(h)
-                // Cheap value-noise — large blobby variation across the frame.
-                let n1 = Self.valueNoise(u * 4, v * 4, 0x21)
-                let n2 = Self.valueNoise(u * 14, v * 14, 0x67) * 0.4
-                let n = n1 + n2 - 0.7
-                let mix01 = max(0, min(1, 0.4 + n * 0.6))
-                let bg = bgBase + (bgWash - bgBase) * mix01
+                // Big-scale uneven density (film exposure variation).
+                let n1 = Self.valueNoise(u * 3.1, v * 3.1, 0x10)
+                let n2 = Self.valueNoise(u * 11.0, v * 11.0, 0x21) * 0.55
+                let nMix = max(0, min(1, 0.35 + (n1 + n2 - 0.7) * 1.1))
+                let bg = mix(bgPale, bgShadow, t: nMix)
                 let idx = 4 * (px + py * w)
                 pixels[idx + 0] = toByte(bg.x)
                 pixels[idx + 1] = toByte(bg.y)
@@ -147,212 +114,272 @@ public struct MicroscopyRenderer {
             }
         }
 
-        // -----------------------------------------------------------------
-        // Cytoplasmic bridges between bonded cells — drawn first so cells
-        // render on top of them. Each bond becomes a thin tapered link in
-        // the slide background tone of a membrane.
-        // -----------------------------------------------------------------
-        var posById = [UInt32: SIMD2<Float>]()
-        posById.reserveCapacity(world.colony.cells.count)
-        for c in world.colony.cells {
-            posById[c.id] = SIMD2<Float>(wx2px(c.position.x), wy2py(c.position.y))
-        }
-        for bond in world.colony.bonds {
-            guard let pa = posById[bond.a], let pb = posById[bond.b] else { continue }
-            drawCytoBridge(into: &pixels, w: w, h: h, a: pa, b: pb,
-                           color: SIMD3<Float>(0.36, 0.42, 0.46),
-                           halfWidth: 1.6)
-        }
-
-        // -----------------------------------------------------------------
-        // Z-sort cells back-to-front for proper depth painting.
-        // -----------------------------------------------------------------
-        var sorted = world.colony.cells
-        sorted.sort { $0.position.z < $1.position.z }
-
-        let baseRPx = cellRadius * pxPerUnitX  // assume square aspect
-
-        // Build cell index → role signals so cytoplasm tone can shift
-        // subtly by NCA output (predator = warmer, motor = neutral,
-        // structural = cooler).
-        var roleP = [UInt32: Float]()
-        var roleC = [UInt32: Float]()
-        for (i, c) in world.colony.cells.enumerated() {
-            roleP[c.id] = world.colony.predation.indices.contains(i) ? max(0, world.colony.predation[i]) : 0
-            roleC[c.id] = world.colony.contraction.indices.contains(i) ? max(0, world.colony.contraction[i]) : 0
-        }
-
-        for cell in sorted {
-            // Per-cell visual seed for stable membrane shape / nucleus offset.
-            let seedCore = UInt32(cell.id)
-            // Cell size varies with cumulative energy + a small per-cell
-            // genetic factor.
-            let energyHeat = 1.0 - expf(-cell.energy * 0.4)
-            let sizeJitter = 0.85 + Self.hash01(seedCore, 11, 0) * 0.4
-            let rPx = baseRPx * sizeJitter * (0.85 + 0.25 * energyHeat)
-            let membranePx = rPx * membraneFrac
-            let nucleusPx = rPx * nucleusFrac
-            // Second internal structure (vacuole/organelle): smaller, dimmer,
-            // farther offset than nucleus.
-            let vacRadiusPx = rPx * 0.16
-            let vacOffMag = rPx * 0.45
-            let cxF = wx2px(cell.position.x)
-            let cyF = wy2py(cell.position.y)
-            // Depth: front cells slightly larger + brighter. zNorm 0 = back.
-            let zNorm = max(0, min(1, cell.position.z / bz))
-            let depthScale: Float = 0.85 + 0.3 * zNorm
-            let depthBright: Float = 0.6 + 0.4 * zNorm
-            let r = rPx * depthScale
-            let r2 = r * r
-
-            // Per-cell variation: each cell gets a deterministic seed so its
-            // membrane noise + nucleus offset are stable frame-to-frame.
-            let seedA = UInt32(truncatingIfNeeded: Int(cell.id) &* 374761)
-            let seedB = UInt32(truncatingIfNeeded: Int(cell.id) &* 668265)
-            let seedC = UInt32(truncatingIfNeeded: Int(cell.id) &* 2147483)
-            let seedD = UInt32(truncatingIfNeeded: Int(cell.id) &* 9176881)
-            let nucleusOffX = (Self.hash01(seedA, 1, 0) - 0.5) * r * 0.35
-            let nucleusOffY = (Self.hash01(seedB, 2, 0) - 0.5) * r * 0.35
-            let nucleusCx = cxF + nucleusOffX
-            let nucleusCy = cyF + nucleusOffY
-            // Vacuole offset — opposite side of nucleus, jittered.
-            let vacAngle = Self.hash01(seedC, 3, 0) * 6.2831
-            let vacCx = cxF + cos(vacAngle) * vacOffMag * depthScale
-            let vacCy = cyF + sin(vacAngle) * vacOffMag * depthScale
-
-            // Cytoplasm tone — base cool/warm shifts by role signals.
-            let pSig = roleP[cell.id] ?? 0
-            let mSig = roleC[cell.id] ?? 0
-            let cytoStruct = SIMD3<Float>(0.42, 0.50, 0.58)   // structural: cool
-            let cytoMotor = SIMD3<Float>(0.55, 0.51, 0.45)    // motor: neutral
-            let cytoPred = SIMD3<Float>(0.60, 0.42, 0.40)     // predator: warm/reddish
-            var cytoBase: SIMD3<Float>
-            if pSig > 0.25 {
-                cytoBase = mix(cytoStruct, cytoPred, t: min(1, pSig * 1.8))
-            } else if mSig > 0.25 {
-                cytoBase = mix(cytoStruct, cytoMotor, t: min(1, mSig * 1.8))
-            } else {
-                cytoBase = cytoStruct
-            }
-            cytoBase = cytoBase * depthBright * (0.9 + 0.2 * energyHeat)
-            let membraneCol = SIMD3<Float>(0.07, 0.08, 0.11) * depthBright
-            let nucleusCol = SIMD3<Float>(0.93, 0.86, 0.74) * depthBright
-            let vacuoleCol = SIMD3<Float>(0.25, 0.28, 0.32) * depthBright
-
-            // Bounding box.
-            let pad = Int(r.rounded(.up)) + 2
-            let x0 = max(0, Int(cxF) - pad), x1 = min(w - 1, Int(cxF) + pad)
-            let y0 = max(0, Int(cyF) - pad), y1 = min(h - 1, Int(cyF) + pad)
-            if x0 > x1 || y0 > y1 { continue }
-
-            // Cytoplasm noise — sample fBm in world coords so it pans with
-            // the cell as it moves.
-            let cytoSeed = UInt32(cell.id &* 1442695)
-
-            for py in y0...y1 {
-                for px in x0...x1 {
-                    let dx = Float(px) - cxF
-                    let dy = Float(py) - cyF
-                    let d2 = dx * dx + dy * dy
-                    if d2 > r2 * 1.15 { continue }  // pre-cull
-                    let d = d2.squareRoot()
-
-                    // Per-pixel membrane-radius modulation: sample angular
-                    // fBm so the cell outline isn't a perfect circle. Real
-                    // cells aren't perfectly round.
-                    let theta = atan2f(dy, dx)
-                    let lobe = Self.valueNoise(theta * 1.3 + 7.0, theta * 0.7, seedD) - 0.5
-                    let lobe2 = Self.valueNoise(theta * 2.7, theta * 1.5 + 3.1, seedC) - 0.5
-                    let radiusMod = r * (1.0 + (lobe * 0.10 + lobe2 * 0.06))
-                    if d > radiusMod { continue }
-
-                    // Distance to nucleus.
-                    let ndx = Float(px) - nucleusCx
-                    let ndy = Float(py) - nucleusCy
-                    let nd2 = ndx * ndx + ndy * ndy
-                    let nd = nd2.squareRoot()
-                    let vdx = Float(px) - vacCx
-                    let vdy = Float(py) - vacCy
-                    let vd2 = vdx * vdx + vdy * vdy
-                    let vd = vd2.squareRoot()
-
-                    var col: SIMD3<Float>
-                    var alpha: Float = 0.82
-
-                    // Cytoplasm fBm in true world coords (respects viewport).
-                    let wx = (viewMinX + Float(px) / pxPerUnitX) / cytoNoiseScale
-                    let wy = (viewMinY + Float(py) / pxPerUnitY) / cytoNoiseScale
-                    let cytoN = Self.fbm(wx, wy, cytoSeed, octaves: 3)
-                    let cytoLit = cytoBase * (0.82 + cytoN * 0.45)
-
-                    if nd < nucleusPx * depthScale {
-                        // Inside nucleus — bright with a soft falloff to the
-                        // cytoplasm at its edge.
-                        let nt = max(0, 1 - nd / (nucleusPx * depthScale))
-                        let nGlow = pow(nt, 0.7)
-                        col = cytoLit + (nucleusCol - cytoLit) * nGlow
-                        alpha = 0.92
-                    } else if vd < vacRadiusPx * depthScale {
-                        // Vacuole — dark soft circle (less prominent than
-                        // nucleus). Reads as a second organelle.
-                        let vt = max(0, 1 - vd / (vacRadiusPx * depthScale))
-                        let vMix = pow(vt, 0.6) * 0.75
-                        col = cytoLit + (vacuoleCol - cytoLit) * vMix
-                        alpha = 0.88
-                    } else if d > radiusMod - membranePx {
-                        // Membrane ring — dark with a soft edge.
-                        let edgeT = max(0, (d - (radiusMod - membranePx)) / membranePx)
-                        let mGlow = 1 - pow(edgeT, 0.6) * 0.4
-                        col = membraneCol * mGlow
-                        let outerFade = max(0, (d - (radiusMod * 0.92)) / (radiusMod * 0.08))
-                        alpha = 0.95 * (1 - outerFade * 0.45)
-                    } else {
-                        col = cytoLit
-                    }
-
-                    // Composite over background.
-                    let idx = 4 * (px + py * w)
-                    let bgR = Float(pixels[idx + 0]) / 255
-                    let bgG = Float(pixels[idx + 1]) / 255
-                    let bgB = Float(pixels[idx + 2]) / 255
-                    let outR = bgR * (1 - alpha) + col.x * alpha
-                    let outG = bgG * (1 - alpha) + col.y * alpha
-                    let outB = bgB * (1 - alpha) + col.z * alpha
-                    pixels[idx + 0] = toByte(outR)
-                    pixels[idx + 1] = toByte(outG)
-                    pixels[idx + 2] = toByte(outB)
+        // Scatter dust / debris specks across the medium — small dark
+        // splotches at random positions, like real micrograph artifacts.
+        let dustCount = max(40, (w * h) / 1600)
+        for k in 0..<dustCount {
+            let rx = Self.hash01(UInt32(k), 0x91, 0)
+            let ry = Self.hash01(UInt32(k), 0x92, 0)
+            let rs = Self.hash01(UInt32(k), 0x93, 0)
+            let dx = Int(rx * Float(w))
+            let dy = Int(ry * Float(h))
+            let radius = max(1, Int(rs * 2.2))
+            let darkness: Float = 0.45 + rs * 0.4
+            for oy in -radius...radius {
+                for ox in -radius...radius {
+                    let d2 = ox * ox + oy * oy
+                    if d2 > radius * radius { continue }
+                    let xi = dx + ox, yi = dy + oy
+                    if xi < 0 || xi >= w || yi < 0 || yi >= h { continue }
+                    let idx = 4 * (xi + yi * w)
+                    let fade: Float = 1 - Float(d2) / Float(radius * radius)
+                    let factor: Float = 1 - darkness * fade
+                    pixels[idx + 0] = toByte(Float(pixels[idx + 0]) / 255 * factor)
+                    pixels[idx + 1] = toByte(Float(pixels[idx + 1]) / 255 * factor)
+                    pixels[idx + 2] = toByte(Float(pixels[idx + 2]) / 255 * factor)
                 }
             }
         }
 
-        // -----------------------------------------------------------------
-        // Final pass: subtle film grain (white noise on luminance) +
-        // vignette. Both subtle — the "noise" already comes from the
-        // background fBm + cytoplasm fBm + cell membrane edges.
-        // -----------------------------------------------------------------
-        let cx = Float(w) * 0.5, cy = Float(h) * 0.5
-        let maxR = sqrt(cx * cx + cy * cy)
+        // ---------------- Group cells by organism ----------------
+        var cellsByOrg: [UInt32: [Int]] = [:]
+        for (i, c) in world.colony.cells.enumerated() {
+            cellsByOrg[c.organismId, default: []].append(i)
+        }
+
+        // Z-sort organisms back-to-front by mean Z.
+        struct OrgRender {
+            var oid: UInt32
+            var cellIdx: [Int]
+            var meanZ: Float
+        }
+        var orgs: [OrgRender] = []
+        for (oid, indices) in cellsByOrg {
+            var sz: Float = 0
+            for i in indices { sz += world.colony.cells[i].position.z }
+            orgs.append(OrgRender(oid: oid, cellIdx: indices, meanZ: sz / Float(indices.count)))
+        }
+        orgs.sort { $0.meanZ < $1.meanZ }
+
+        // ---------------- Per-organism body render ----------------
+        // For each organism, accumulate a metaball field over its cells,
+        // threshold it for the outer membrane, fill the interior with
+        // semi-transparent dark cytoplasm. Then draw each cell's nucleus
+        // as a small darker spot, and vacuoles as paler spots.
+        let rWorld = cellRadius
+        let r2World = rWorld * rWorld
+        // Influence radius in pixels (for bounding box).
+        let influencePxX = (rWorld * 1.6) * pxPerUnitX
+        let influencePxY = (rWorld * 1.6) * pxPerUnitY
+
+        for org in orgs {
+            // Gather projected cell positions for this org.
+            struct ProjCell { var px: Float; var py: Float; var z: Float; var energy: Float; var nucleus: Bool }
+            var projected: [ProjCell] = []
+            projected.reserveCapacity(org.cellIdx.count)
+            var bbMinX = Float.greatestFiniteMagnitude, bbMinY = Float.greatestFiniteMagnitude
+            var bbMaxX = -Float.greatestFiniteMagnitude, bbMaxY = -Float.greatestFiniteMagnitude
+            for i in org.cellIdx {
+                let c = world.colony.cells[i]
+                let pX = wx2px(c.position.x)
+                let pY = wy2py(c.position.y)
+                projected.append(ProjCell(
+                    px: pX, py: pY, z: c.position.z,
+                    energy: c.energy, nucleus: true
+                ))
+                bbMinX = min(bbMinX, pX - influencePxX)
+                bbMinY = min(bbMinY, pY - influencePxY)
+                bbMaxX = max(bbMaxX, pX + influencePxX)
+                bbMaxY = max(bbMaxY, pY + influencePxY)
+            }
+            // Mean role signals for this organism — drives tonal hint
+            // (warmer = predator, cooler = structural). Subtle, not rainbow.
+            var meanPred: Float = 0, meanMotor: Float = 0
+            for i in org.cellIdx {
+                if world.colony.predation.indices.contains(i) {
+                    meanPred += max(0, world.colony.predation[i])
+                }
+                if world.colony.contraction.indices.contains(i) {
+                    meanMotor += max(0, world.colony.contraction[i])
+                }
+            }
+            meanPred /= Float(org.cellIdx.count)
+            meanMotor /= Float(org.cellIdx.count)
+
+            // Body fill colour: dark with a subtle role tint.
+            let bodyBase = SIMD3<Float>(0.20, 0.19, 0.18)
+            let bodyPred = SIMD3<Float>(0.26, 0.18, 0.16)  // warm-dark
+            let bodyMot  = SIMD3<Float>(0.21, 0.21, 0.18)
+            var bodyCol = mix(bodyBase, bodyPred, t: min(1, meanPred * 2.0))
+            bodyCol = mix(bodyCol, bodyMot, t: min(1, meanMotor * 1.2))
+            // Slight depth fade (front organisms darker = closer to lens).
+            let zNorm = max(0, min(1, projected.reduce(0) { $0 + $1.z } / Float(projected.count) / bz))
+            let depthFactor: Float = 0.85 + 0.15 * zNorm
+            bodyCol *= depthFactor
+
+            // Bounding box in pixels (clamped).
+            let x0 = max(0, Int(bbMinX) - 1), x1 = min(w - 1, Int(bbMaxX) + 1)
+            let y0 = max(0, Int(bbMinY) - 1), y1 = min(h - 1, Int(bbMaxY) + 1)
+            if x0 > x1 || y0 > y1 { continue }
+
+            // Influence radius in pixels for the field falloff.
+            let influence = rWorld * pxPerUnitX  // body cells size — use X scale
+            let influence2 = influence * influence
+            let surfaceThreshold: Float = 0.6  // isovalue cutoff
+
+            for py in y0...y1 {
+                for px in x0...x1 {
+                    let qx = Float(px), qy = Float(py)
+                    var field: Float = 0
+                    for c in projected {
+                        let dx = c.px - qx
+                        let dy = c.py - qy
+                        let d2 = dx * dx + dy * dy
+                        if d2 > influence2 * 4 { continue }  // cull
+                        let v: Float = max(0, 1 - d2 / (influence2 * 1.2))
+                        field += v * v
+                    }
+                    if field < surfaceThreshold * 0.35 { continue }
+
+                    let idx = 4 * (px + py * w)
+                    let bgR = Float(pixels[idx + 0]) / 255
+                    let bgG = Float(pixels[idx + 1]) / 255
+                    let bgB = Float(pixels[idx + 2]) / 255
+
+                    if field > surfaceThreshold {
+                        // INTERIOR — semi-transparent dark cytoplasm with
+                        // cytoplasm-noise texture in world coords.
+                        let wx = (viewMinX + qx / pxPerUnitX)
+                        let wy = (viewMinY + qy / pxPerUnitY)
+                        let texN = Self.fbm(wx * 1.6, wy * 1.6, 0x33, octaves: 3)
+                        let interior = bodyCol * (0.88 + texN * 0.25)
+                        // Interior is translucent so background grain shows
+                        // through — keeps it from looking like flat paint.
+                        let alphaInner: Float = 0.78
+                        pixels[idx + 0] = toByte(bgR * (1 - alphaInner) + interior.x * alphaInner)
+                        pixels[idx + 1] = toByte(bgG * (1 - alphaInner) + interior.y * alphaInner)
+                        pixels[idx + 2] = toByte(bgB * (1 - alphaInner) + interior.z * alphaInner)
+                    } else {
+                        // MEMBRANE band — the dark thin edge where field
+                        // crosses the isovalue. Strongest at the surface.
+                        let t = (field - surfaceThreshold * 0.35) / (surfaceThreshold * 0.65)
+                        let edge: Float = sin(t * .pi)  // 0 at outer/inner, 1 at middle
+                        let memCol = SIMD3<Float>(0.08, 0.07, 0.06) * depthFactor
+                        let alphaEdge: Float = edge * 0.88
+                        pixels[idx + 0] = toByte(bgR * (1 - alphaEdge) + memCol.x * alphaEdge)
+                        pixels[idx + 1] = toByte(bgG * (1 - alphaEdge) + memCol.y * alphaEdge)
+                        pixels[idx + 2] = toByte(bgB * (1 - alphaEdge) + memCol.z * alphaEdge)
+                    }
+                }
+            }
+
+            // ----- Internal structures: nuclei (dark spots) + vacuoles
+            // (pale spots) per cell, INSIDE the body envelope. These read
+            // as organelles within one organism, not separate dots.
+            for c in projected {
+                let nucleusPx = max(1.2, influence * 0.18)
+                let vacRadiusPx = max(0.8, influence * 0.11)
+                // Nucleus offset deterministic per cell (use position hash).
+                let seedX = UInt32(truncatingIfNeeded: Int(c.px * 7 + c.py * 13))
+                let nOffX = (Self.hash01(seedX, 1, 0) - 0.5) * influence * 0.3
+                let nOffY = (Self.hash01(seedX, 2, 0) - 0.5) * influence * 0.3
+                let nCx = c.px + nOffX, nCy = c.py + nOffY
+                let vAng = Self.hash01(seedX, 3, 0) * 6.2831
+                let vCx = c.px + cos(vAng) * influence * 0.32
+                let vCy = c.py + sin(vAng) * influence * 0.32
+
+                // Nucleus: small dark spot.
+                let nPad = Int(nucleusPx.rounded(.up)) + 1
+                for oy in -nPad...nPad {
+                    for ox in -nPad...nPad {
+                        let xi = Int(nCx) + ox, yi = Int(nCy) + oy
+                        if xi < 0 || xi >= w || yi < 0 || yi >= h { continue }
+                        let dx = Float(ox), dy = Float(oy)
+                        let d2 = dx * dx + dy * dy
+                        let r2px = nucleusPx * nucleusPx
+                        if d2 > r2px { continue }
+                        let fade: Float = max(0, 1 - sqrt(d2) / nucleusPx)
+                        let alpha: Float = pow(fade, 0.7) * 0.85
+                        let idx = 4 * (xi + yi * w)
+                        pixels[idx + 0] = toByte(Float(pixels[idx + 0]) / 255 * (1 - alpha) + 0.03 * alpha)
+                        pixels[idx + 1] = toByte(Float(pixels[idx + 1]) / 255 * (1 - alpha) + 0.03 * alpha)
+                        pixels[idx + 2] = toByte(Float(pixels[idx + 2]) / 255 * (1 - alpha) + 0.03 * alpha)
+                    }
+                }
+                // Vacuole: small pale spot.
+                let vPad = Int(vacRadiusPx.rounded(.up)) + 1
+                for oy in -vPad...vPad {
+                    for ox in -vPad...vPad {
+                        let xi = Int(vCx) + ox, yi = Int(vCy) + oy
+                        if xi < 0 || xi >= w || yi < 0 || yi >= h { continue }
+                        let dx = Float(ox), dy = Float(oy)
+                        let d2 = dx * dx + dy * dy
+                        let r2px = vacRadiusPx * vacRadiusPx
+                        if d2 > r2px { continue }
+                        let fade: Float = max(0, 1 - sqrt(d2) / vacRadiusPx)
+                        let alpha: Float = pow(fade, 0.8) * 0.5
+                        let idx = 4 * (xi + yi * w)
+                        let pale: SIMD3<Float> = SIMD3<Float>(0.75, 0.72, 0.66)
+                        pixels[idx + 0] = toByte(Float(pixels[idx + 0]) / 255 * (1 - alpha) + pale.x * alpha)
+                        pixels[idx + 1] = toByte(Float(pixels[idx + 1]) / 255 * (1 - alpha) + pale.y * alpha)
+                        pixels[idx + 2] = toByte(Float(pixels[idx + 2]) / 255 * (1 - alpha) + pale.z * alpha)
+                    }
+                }
+            }
+            _ = r2World
+        }
+
+        // ---------------- Global film-grain + slight blur ----------------
+        // Heavy luminance grain over the entire image (film not pixels).
         for py in 0..<h {
             for px in 0..<w {
-                let dx = Float(px) - cx
-                let dy = Float(py) - cy
-                let r01 = sqrt(dx * dx + dy * dy) / maxR
-                let vignette: Float = 1 - r01 * r01 * 0.30
-                let grain = (Self.hash01(UInt32(px), UInt32(py), 0xAA) - 0.5) * 0.04
+                let g = (Self.hash01(UInt32(px), UInt32(py), 0xC1) - 0.5) * 0.08
                 let idx = 4 * (px + py * w)
-                let r = Float(pixels[idx + 0]) / 255 * vignette + grain
-                let g = Float(pixels[idx + 1]) / 255 * vignette + grain
-                let b = Float(pixels[idx + 2]) / 255 * vignette + grain
-                pixels[idx + 0] = toByte(r)
-                pixels[idx + 1] = toByte(g)
-                pixels[idx + 2] = toByte(b)
+                pixels[idx + 0] = toByte(Float(pixels[idx + 0]) / 255 + g)
+                pixels[idx + 1] = toByte(Float(pixels[idx + 1]) / 255 + g)
+                pixels[idx + 2] = toByte(Float(pixels[idx + 2]) / 255 + g)
             }
         }
 
-        return pixels
+        // Vignette — pronounced corner darkening (microscope eyepiece).
+        let cxf = Float(w) * 0.5, cyf = Float(h) * 0.5
+        let maxR = sqrt(cxf * cxf + cyf * cyf)
+        for py in 0..<h {
+            for px in 0..<w {
+                let dx = Float(px) - cxf
+                let dy = Float(py) - cyf
+                let r01 = sqrt(dx * dx + dy * dy) / maxR
+                let vignette: Float = 1 - r01 * r01 * 0.55
+                let idx = 4 * (px + py * w)
+                pixels[idx + 0] = toByte(Float(pixels[idx + 0]) / 255 * vignette)
+                pixels[idx + 1] = toByte(Float(pixels[idx + 1]) / 255 * vignette)
+                pixels[idx + 2] = toByte(Float(pixels[idx + 2]) / 255 * vignette)
+            }
+        }
+
+        // 1-pixel box blur — softens hard edges so nothing looks sharp / CGI.
+        var blurred = pixels
+        for py in 1..<(h - 1) {
+            for px in 1..<(w - 1) {
+                var sr: Int = 0, sg: Int = 0, sb: Int = 0
+                for oy in -1...1 {
+                    for ox in -1...1 {
+                        let idx = 4 * ((px + ox) + (py + oy) * w)
+                        sr += Int(pixels[idx + 0])
+                        sg += Int(pixels[idx + 1])
+                        sb += Int(pixels[idx + 2])
+                    }
+                }
+                let idx = 4 * (px + py * w)
+                blurred[idx + 0] = UInt8(sr / 9)
+                blurred[idx + 1] = UInt8(sg / 9)
+                blurred[idx + 2] = UInt8(sb / 9)
+            }
+        }
+        return blurred
     }
 
-    // MARK: - helpers (file-private so other renderers can ignore them)
+    // MARK: - Helpers
 
     @inline(__always)
     private func toByte(_ v: Float) -> UInt8 {
@@ -362,44 +389,6 @@ public struct MicroscopyRenderer {
     @inline(__always)
     private func mix(_ a: SIMD3<Float>, _ b: SIMD3<Float>, t: Float) -> SIMD3<Float> {
         a + (b - a) * t
-    }
-
-    private func drawCytoBridge(
-        into pixels: inout [UInt8], w: Int, h: Int,
-        a: SIMD2<Float>, b: SIMD2<Float>,
-        color: SIMD3<Float>, halfWidth: Float
-    ) {
-        let dx = b.x - a.x
-        let dy = b.y - a.y
-        let len = sqrt(dx * dx + dy * dy)
-        if len < 1 { return }
-        let nx = -dy / len  // normal
-        let ny = dx / len
-        let steps = Int(len.rounded(.up))
-        for s in 0..<steps {
-            let t = Float(s) / Float(max(1, steps - 1))
-            let cx = a.x + dx * t
-            let cy = a.y + dy * t
-            // Bridge tapers at the ends.
-            let taper = sin(t * .pi)
-            let hw = halfWidth * taper
-            let hwI = Int(hw.rounded(.up))
-            for off in -hwI...hwI {
-                let f = Float(off) / max(0.01, hw)
-                let alpha: Float = max(0, (1 - f * f)) * 0.65
-                let pxF = cx + nx * Float(off)
-                let pyF = cy + ny * Float(off)
-                let xi = Int(pxF.rounded()), yi = Int(pyF.rounded())
-                if xi < 0 || xi >= w || yi < 0 || yi >= h { continue }
-                let idx = 4 * (xi + yi * w)
-                let bgR = Float(pixels[idx + 0]) / 255
-                let bgG = Float(pixels[idx + 1]) / 255
-                let bgB = Float(pixels[idx + 2]) / 255
-                pixels[idx + 0] = toByte(bgR * (1 - alpha) + color.x * alpha)
-                pixels[idx + 1] = toByte(bgG * (1 - alpha) + color.y * alpha)
-                pixels[idx + 2] = toByte(bgB * (1 - alpha) + color.z * alpha)
-            }
-        }
     }
 
     @inline(__always)
