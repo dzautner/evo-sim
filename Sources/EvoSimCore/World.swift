@@ -7,16 +7,24 @@ public struct World {
     public private(set) var time: Double
     public var rng: Xoshiro256
     public var chemistry: NutrientField
+    /// A second scalar field used as a *signaling morphogen* — cells secrete
+    /// into it (NCA morphogen output) and read its local value + gradient
+    /// (NCA input). This is the chemical communication channel through
+    /// which lineages can break body symmetry: regions that consistently
+    /// secrete or consistently react establish head/tail/inside/outside
+    /// gradients. Nothing about "head" or "mouth" is hardcoded — the genome
+    /// chooses what to secrete and how to respond.
+    public var morphogen: NutrientField
     public var colony: Colony
     public var spatial: SpatialIndex
 
     public let genomeShape: GenomeShape
 
     public init(
-        bounds: SIMD3<Float> = SIMD3<Float>(48, 48, 48),
+        bounds: SIMD3<Float> = SIMD3<Float>(80, 80, 80),
         fixedDt: Double = 1.0 / 60.0,
         seed: UInt64 = 0xC0FFEE,
-        chemistry: NutrientField = NutrientField(),
+        chemistry: NutrientField = NutrientField(resolution: SIMD3<Int32>(80, 80, 80)),
         colony: Colony = Colony(),
         genomeShape: GenomeShape? = nil
     ) {
@@ -26,6 +34,15 @@ public struct World {
         self.time = 0
         self.rng = Xoshiro256(seed: seed)
         self.chemistry = chemistry
+        // Morphogen field uses faster diffusion + decay than nutrient — it's a
+        // SIGNAL, not a resource, so it should propagate quickly and not
+        // accumulate.
+        self.morphogen = NutrientField(
+            resolution: chemistry.resolution,
+            cellSize: chemistry.cellSize,
+            diffusion: 0.35,
+            decay: 0.4
+        )
         self.colony = colony
         let stateCh = Cell.stateChannelCount
         self.genomeShape = genomeShape ?? GenomeShape(
@@ -40,8 +57,10 @@ public struct World {
 
     public mutating func tick() {
         let dt = Float(fixedDt)
-        colony.tick(dt: dt, chemistry: &chemistry, index: &spatial, bounds: bounds, rng: &rng)
+        colony.tick(dt: dt, chemistry: &chemistry, morphogen: &morphogen,
+                    index: &spatial, bounds: bounds, rng: &rng)
         chemistry.diffuse(dt: dt)
+        morphogen.diffuse(dt: dt)
         step &+= 1
         time += fixedDt
     }

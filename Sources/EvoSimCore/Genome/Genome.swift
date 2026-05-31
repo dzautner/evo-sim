@@ -33,13 +33,14 @@ public struct GenomeShape: Equatable {
 /// Kept here (not hardcoded inside NCA) so we never embed magic numbers.
 public enum NCAInput {
     /// Layout: [own state (stateCh) | mean neighbor state (stateCh) |
-    ///          local chemistry vec (4: c, ∂c/∂x, ∂c/∂y, ∂c/∂z) |
+    ///          local nutrient + grad (4) | morphogen + grad (4) |
     ///          mechanical stress (1) | bias (1)]
     public static let chemistryChannels = 4
+    public static let morphogenChannels = 4
     public static let auxChannels = 2  // stress + bias
 
     public static func size(stateChannels: Int) -> Int {
-        2 * stateChannels + chemistryChannels + auxChannels
+        2 * stateChannels + chemistryChannels + morphogenChannels + auxChannels
     }
 }
 
@@ -48,7 +49,7 @@ public enum NCAInput {
 public enum NCAOutput {
     /// Layout (all indices are AFTER the `stateCh` Δstate block):
     ///   divide (1) | bud (1) | die (1) | divDir (3) |
-    ///   bondStiffness (1) | contraction (1) | predation (1)
+    ///   bondStiffness (1) | contraction (1) | predation (1) | morphogen (1)
     public static let divideIdx        = 0
     public static let budIdx           = 1
     public static let dieIdx           = 2
@@ -56,8 +57,9 @@ public enum NCAOutput {
     public static let bondStiffnessIdx = 6
     public static let contractionIdx   = 7
     public static let predationIdx     = 8
+    public static let morphogenIdx     = 9   // amount of morphogen to secrete
 
-    public static let nonStateChannels = 9
+    public static let nonStateChannels = 10
 
     public static func size(stateChannels: Int) -> Int {
         stateChannels + nonStateChannels

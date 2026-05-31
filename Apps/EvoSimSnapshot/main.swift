@@ -25,7 +25,8 @@ struct CLI {
     var trailEvery: Int = 6      // capture every N ticks (so trail covers trailFrames * trailEvery ticks)
     var selectEvery: Int = 0     // 0 = off — tournament-selection cadence
     var keepFraction: Float = 0.4
-    var motionBias: Float = 0.0  // selection: how much to weight displacement
+    var motionBias: Float = 0.0     // selection: weight displacement
+    var chemotaxisBias: Float = 0.0 // selection: weight being near food
     var grid: Int = 0            // 0 = single image; >0 = N×N grid time-lapse
     var gifFrames: Int = 0       // 0 = off; >0 = capture this many GIF frames
     var gifDelay: Double = 0.05  // seconds between frames (1/20s)
@@ -53,6 +54,7 @@ struct CLI {
             case "--select-every": if let v = nextVal(), let n = Int(v) { c.selectEvery = max(0, n); i += 1 }
             case "--keep":        if let v = nextVal(), let n = Float(v) { c.keepFraction = max(0.1, min(0.95, n)); i += 1 }
             case "--motion-bias": if let v = nextVal(), let n = Float(v) { c.motionBias = max(0, n); i += 1 }
+            case "--chemotaxis-bias": if let v = nextVal(), let n = Float(v) { c.chemotaxisBias = max(0, n); i += 1 }
             case "--grid":        if let v = nextVal(), let n = Int(v) { c.grid = max(0, n); i += 1 }
             case "--gif":         if let v = nextVal(), let n = Int(v) { c.gifFrames = max(0, n); i += 1 }
             case "--gif-delay":   if let v = nextVal(), let n = Double(v) { c.gifDelay = max(0.01, n); i += 1 }

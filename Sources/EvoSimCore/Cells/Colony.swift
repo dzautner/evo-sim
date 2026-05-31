@@ -123,28 +123,58 @@ public struct Colony {
     /// genome itself is untouched; we only choose which genomes get to
     /// continue. The selection criterion (survive + grow) is the same
     /// criterion biology imposes via the environment, just accelerated.
-    public mutating func applySelectionPressure(keepFraction: Float = 0.4, motionBias: Float = 0.0) {
+    public mutating func applySelectionPressure(
+        keepFraction: Float = 0.4,
+        motionBias: Float = 0.0,
+        chemotaxisBias: Float = 0.0,
+        chemistry: NutrientField? = nil
+    ) {
         guard organismCount > 4 else { return }
 
-        // Aggregate per organism.
-        struct OrgStat { var oid: UInt32; var cellCount: Int; var totalEnergy: Float }
+        // Aggregate per organism: cell count, summed energy, mean position
+        // (for chemistry sampling), mean predation signal (predator role).
+        struct OrgStat {
+            var oid: UInt32; var cellCount: Int; var totalEnergy: Float
+            var meanPos: SIMD3<Float>; var meanPredation: Float
+        }
         var stats: [UInt32: OrgStat] = [:]
         stats.reserveCapacity(organismCount)
-        for c in cells {
-            var s = stats[c.organismId] ?? OrgStat(oid: c.organismId, cellCount: 0, totalEnergy: 0)
+        for (i, c) in cells.enumerated() {
+            var s = stats[c.organismId] ?? OrgStat(
+                oid: c.organismId, cellCount: 0, totalEnergy: 0,
+                meanPos: .zero, meanPredation: 0
+            )
             s.cellCount += 1
             s.totalEnergy += max(0, c.energy)
+            s.meanPos += c.position
+            if predation.indices.contains(i) {
+                s.meanPredation += max(0, predation[i])
+            }
             stats[c.organismId] = s
         }
+        for (oid, var s) in stats {
+            let inv = 1.0 / Float(max(1, s.cellCount))
+            s.meanPos *= inv
+            s.meanPredation *= inv
+            stats[oid] = s
+        }
+
         let scored: [(UInt32, Float)] = stats.values.map { s in
             let age = organisms[s.oid]?.ageTicks ?? 1
             let avgE = s.totalEnergy / Float(s.cellCount)
             let survivalFitness = Float(s.cellCount) * avgE * sqrt(Float(age) + 1)
-            // Motion fitness: displacement per tick of life. Zero if motionBias=0.
+            // Motion fitness.
             let disp = organisms[s.oid]?.totalDisplacement ?? 0
             let speed = disp / max(1, Float(age))
             let motion = speed * motionBias * Float(s.cellCount)
-            return (s.oid, survivalFitness + motion)
+            // Chemotaxis: bonus for being in a nutrient-rich grid cell.
+            var chemo: Float = 0
+            if chemotaxisBias > 0, let cf = chemistry,
+               let g = cf.gridIndex(for: s.meanPos) {
+                let local = cf.sample(at: g.i, g.j, g.k)
+                chemo = local * chemotaxisBias * Float(s.cellCount)
+            }
+            return (s.oid, survivalFitness + motion + chemo)
         }.sorted { $0.1 > $1.1 }
 
         let keep = max(2, Int(Float(scored.count) * keepFraction))
@@ -186,6 +216,7 @@ public struct Colony {
     public mutating func tick(
         dt: Float,
         chemistry: inout NutrientField,
+        morphogen: inout NutrientField,
         index: inout SpatialIndex,
         bounds: SIMD3<Float>,
         rng: inout Xoshiro256
@@ -252,19 +283,31 @@ public struct Colony {
                 for k in 0..<stateCh { meanNeighbor[k] *= inv }
             }
 
-            // Chemistry: local concentration + central-difference gradient.
+            // Chemistry: local nutrient + central-difference gradient.
             let (cAt, gradX, gradY, gradZ) = sampleChemistryAt(cell.position, in: chemistry)
+            // Morphogen: local signal + gradient. Lets cells read positional
+            // information that other cells have secreted into the medium.
+            let (mAt, mGradX, mGradY, mGradZ) = sampleChemistryAt(cell.position, in: morphogen)
 
             // Assemble input vector.
-            // Layout: [own state | mean neighbor state | c, gx, gy, gz | stress, bias]
+            // Layout: [own state | mean neighbor state |
+            //          nutrient + grad (4) | morphogen + grad (4) |
+            //          stress, bias]
             for k in 0..<stateCh { inputBuf[k] = cell.state[k] }
             for k in 0..<stateCh { inputBuf[stateCh + k] = meanNeighbor[k] }
-            inputBuf[2 * stateCh + 0] = cAt
-            inputBuf[2 * stateCh + 1] = gradX
-            inputBuf[2 * stateCh + 2] = gradY
-            inputBuf[2 * stateCh + 3] = gradZ
-            inputBuf[2 * stateCh + 4] = stress[ci]  // mechanical stress from prev tick
-            inputBuf[2 * stateCh + 5] = 1           // bias
+            var base = 2 * stateCh
+            inputBuf[base + 0] = cAt
+            inputBuf[base + 1] = gradX
+            inputBuf[base + 2] = gradY
+            inputBuf[base + 3] = gradZ
+            base += 4
+            inputBuf[base + 0] = mAt
+            inputBuf[base + 1] = mGradX
+            inputBuf[base + 2] = mGradY
+            inputBuf[base + 3] = mGradZ
+            base += 4
+            inputBuf[base + 0] = stress[ci]  // mechanical stress from prev tick
+            inputBuf[base + 1] = 1           // bias
 
             // Forward pass uses organism's workspace.
             var ws = org.workspace
@@ -294,6 +337,20 @@ public struct Colony {
             //     predation pass can use them this tick. tanh output [-1, 1].
             contraction[ci] = outputBuf[stateCh + NCAOutput.contractionIdx]
             predation[ci]   = outputBuf[stateCh + NCAOutput.predationIdx]
+
+            // 2e. Morphogen secretion — positive output adds the signal to
+            //     the local morphogen grid cell. Negative output is ignored
+            //     (cells can't absorb the morphogen, only secrete).
+            let secrete = outputBuf[stateCh + NCAOutput.morphogenIdx]
+            if secrete > 0,
+               let g = morphogen.gridIndex(for: cell.position) {
+                morphogen.deposit(
+                    at: cell.position,
+                    amount: secrete * 0.6 * dt,  // gentle so it diffuses cleanly
+                    sigma: 1.2
+                )
+                _ = g
+            }
 
             if dieSig > dieThreshold { deaths.insert(ci); continue }
             if postMetab <= 0 { deaths.insert(ci); continue }
