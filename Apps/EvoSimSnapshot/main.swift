@@ -29,6 +29,7 @@ struct CLI {
     var grid: Int = 0            // 0 = single image; >0 = N×N grid time-lapse
     var gifFrames: Int = 0       // 0 = off; >0 = capture this many GIF frames
     var gifDelay: Double = 0.05  // seconds between frames (1/20s)
+    var raymarch: Bool = false   // use the 3D raymarch renderer
     var out: String = "snapshot.png"
 
     static func parse(_ args: [String]) -> CLI {
@@ -53,6 +54,7 @@ struct CLI {
             case "--grid":        if let v = nextVal(), let n = Int(v) { c.grid = max(0, n); i += 1 }
             case "--gif":         if let v = nextVal(), let n = Int(v) { c.gifFrames = max(0, n); i += 1 }
             case "--gif-delay":   if let v = nextVal(), let n = Double(v) { c.gifDelay = max(0.01, n); i += 1 }
+            case "--raymarch":    c.raymarch = true
             case "--out":         if let v = nextVal() { c.out = v; i += 1 }
             case "-h", "--help":
                 print("EvoSimSnapshot [--seed N] [--steps N] [--width W] [--height H] [--organisms N] [--food N] [--food-every N] [--trail K] [--trail-every K] [--out path.png]")
@@ -91,12 +93,15 @@ let frameRenderer = SnapshotRenderer(width: gridFrameSize, height: gridFrameSize
 
 // GIF capture: if cli.gifFrames > 0, capture that many frames evenly through
 // the run at the full snapshot resolution and emit a single animated GIF.
+// When --raymarch is set, GIF frames are raymarched too (slower but matches
+// the single-frame look).
 var gifFrames: [[UInt8]] = []
 let gifInterval: Int = cli.gifFrames > 0
     ? max(1, cli.steps / cli.gifFrames)
     : Int.max
 var nextGifCapture = gifInterval - 1
-let gifRenderer = SnapshotRenderer(width: cli.width, height: cli.height)
+let gifMetaballRenderer = SnapshotRenderer(width: cli.width, height: cli.height)
+let gifRaymarchRenderer = RaymarchRenderer(width: cli.width, height: cli.height)
 
 let t0 = Date()
 // Drifting current state — periodically shifts so the tank doesn't stagnate.
@@ -148,7 +153,10 @@ for n in 0..<cli.steps {
         nextGridCapture += gridFrameInterval
     }
     if cli.gifFrames > 0 && n >= nextGifCapture && gifFrames.count < cli.gifFrames {
-        gifFrames.append(gifRenderer.renderRGBA(world))
+        let frame = cli.raymarch
+            ? gifRaymarchRenderer.renderRGBA(world)
+            : gifMetaballRenderer.renderRGBA(world)
+        gifFrames.append(frame)
         nextGifCapture += gifInterval
     }
 }
@@ -196,6 +204,16 @@ if cli.gifFrames > 0 && !gifFrames.isEmpty {
         exit(1)
     }
     print("[snapshot] wrote \(outURL.path) (\(totalW)×\(totalH) — \(gridN)×\(gridN) time-lapse)")
+} else if cli.raymarch {
+    let rm = RaymarchRenderer(width: cli.width, height: cli.height)
+    let t1 = Date()
+    if !rm.writePNG(world, to: outURL) {
+        FileHandle.standardError.write(Data("failed to write \(outURL.path)\n".utf8))
+        exit(1)
+    }
+    let rmWall = Date().timeIntervalSince(t1)
+    print(String(format: "[snapshot] raymarched %d×%d in %.2fs → %@",
+                 cli.width, cli.height, rmWall, outURL.path))
 } else {
     var renderer = SnapshotRenderer(width: cli.width, height: cli.height)
     renderer.trailFrames = trailFrames
