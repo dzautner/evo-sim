@@ -21,18 +21,26 @@ public final class TankViewModel: ObservableObject {
     @Published public var speedMultiplier: Double = 1.0
     @Published public var isPaused: Bool = false
     @Published public private(set) var bakedImage: CGImage?
+    @Published public private(set) var lastEvent: String = ""
 
     private var lastHostTime: CFTimeInterval = 0
     private var accumulator: Double = 0
-    private var ticksSinceLastSprinkle: Int = 0
-    private let maxStepsPerPump = 64
+    // Event-loop counters (in sim ticks).
+    private var ticksSinceFoodSprinkle: Int = 0
+    private var ticksSinceSelection: Int = 0
+    private var ticksSinceImmigration: Int = 0
+    private var ticksSinceCurrentShift: Int = 0
+    private var currentDirection: SIMD3<Float> = .zero
+    private let maxStepsPerPump = 96
     private var timer: Timer?
     private var renderer: SnapshotRenderer
 
-    public init(seed: UInt64 = 0xC0FFEE, initialOrganisms: Int = 24, renderResolution: Int = 512) {
+    public init(seed: UInt64 = UInt64.random(in: 1...UInt64.max),
+                initialOrganisms: Int = 6,
+                renderResolution: Int = 512) {
         var w = World(seed: seed)
         w.seedRandomOrganisms(count: initialOrganisms)
-        w.sprinkleFood(count: 12, amount: 220, sigma: 4.5)
+        w.sprinkleFood(count: 14, amount: 220, sigma: 4.5)
         self.world = w
         self.renderer = SnapshotRenderer(width: renderResolution, height: renderResolution)
     }
@@ -87,10 +95,9 @@ public final class TankViewModel: ObservableObject {
             accumulator += dt * speedMultiplier
             var stepped = 0
             while accumulator >= world.fixedDt && stepped < maxStepsPerPump {
-                ticksSinceLastSprinkle += 1
-                if ticksSinceLastSprinkle >= 240 {
-                    world.sprinkleFood(count: 6)
-                    ticksSinceLastSprinkle = 0
+                runScheduledEvents()
+                if simd_length(currentDirection) > 1e-4 {
+                    world.applyCurrent(currentDirection, strength: 0.6)
                 }
                 world.tick()
                 accumulator -= world.fixedDt
@@ -101,6 +108,59 @@ public final class TankViewModel: ObservableObject {
         // Re-bake at ~10 Hz independent of sim speed.
         let pxBuf = renderer.renderRGBA(world)
         bakedImage = Self.makeImage(pixels: pxBuf, width: renderer.width, height: renderer.height)
+    }
+
+    /// Everlasting event loop: tiny continuous noise + larger periodic events
+    /// keep the tank from going static. Selection prunes failed lineages;
+    /// immigrants inject fresh genomes; food sprinkles in patterns; the
+    /// medium drifts. The tank should be interesting indefinitely.
+    private func runScheduledEvents() {
+        ticksSinceFoodSprinkle += 1
+        ticksSinceSelection += 1
+        ticksSinceImmigration += 1
+        ticksSinceCurrentShift += 1
+
+        if ticksSinceFoodSprinkle >= 220 {
+            // Alternate between scattered and clustered patterns so the tank
+            // doesn't develop a permanent equilibrium.
+            if Int.random(in: 0...2) == 0 {
+                // Clustered: 3 dense patches.
+                world.sprinkleFood(count: 3, amount: 320, sigma: 5.5)
+            } else {
+                world.sprinkleFood(count: 8, amount: 180, sigma: 3.8)
+            }
+            ticksSinceFoodSprinkle = 0
+        }
+
+        if ticksSinceSelection >= 2400 && world.colony.organismCount > 10 {
+            let before = world.colony.organismCount
+            world.colony.applySelectionPressure(keepFraction: 0.55, motionBias: 8.0)
+            lastEvent = "selection: \(before) → top \(Int(Float(before) * 0.55))"
+            ticksSinceSelection = 0
+        }
+
+        if ticksSinceImmigration >= 1800 && world.colony.organismCount < 30 {
+            world.injectImmigrants(count: 3)
+            lastEvent = "immigrants arrived (+3 random genomes)"
+            ticksSinceImmigration = 0
+        }
+
+        if ticksSinceCurrentShift >= 4500 {
+            // Pick a new gentle drift direction or stop the current.
+            let r = Float.random(in: 0..<1)
+            if r < 0.3 {
+                currentDirection = .zero
+                lastEvent = "current died down"
+            } else {
+                currentDirection = SIMD3<Float>(
+                    Float.random(in: -1...1),
+                    Float.random(in: -1...1),
+                    Float.random(in: -0.3...0.3)
+                )
+                lastEvent = "drift current shifted"
+            }
+            ticksSinceCurrentShift = 0
+        }
     }
 
     private static func makeImage(pixels: [UInt8], width: Int, height: Int) -> CGImage? {
@@ -165,6 +225,11 @@ public struct TankView: View {
             Text(String(format: "speed %.0fx", vm.speedMultiplier))
             Text("orgs  \(vm.world.colony.organismCount)")
             Text("cells \(vm.world.colony.count)")
+            if !vm.lastEvent.isEmpty {
+                Text(vm.lastEvent)
+                    .foregroundStyle(.yellow.opacity(0.85))
+                    .padding(.top, 6)
+            }
         }
         .font(.system(size: 11, design: .monospaced))
         .foregroundStyle(.green.opacity(0.75))

@@ -99,9 +99,34 @@ var nextGifCapture = gifInterval - 1
 let gifRenderer = SnapshotRenderer(width: cli.width, height: cli.height)
 
 let t0 = Date()
+// Drifting current state — periodically shifts so the tank doesn't stagnate.
+var currentDir: SIMD3<Float> = .zero
+var ticksSinceCurrentShift = 0
+
 for n in 0..<cli.steps {
     if cli.foodEvery > 0 && n > 0 && n % cli.foodEvery == 0 {
-        world.sprinkleFood(count: cli.foodPerSprinkle, amount: 220, sigma: 4.5)
+        // Alternate clustered and scattered food patterns.
+        if Int.random(in: 0...2) == 0 {
+            world.sprinkleFood(count: 3, amount: 320, sigma: 5.5)
+        } else {
+            world.sprinkleFood(count: cli.foodPerSprinkle, amount: 200, sigma: 4.0)
+        }
+    }
+    ticksSinceCurrentShift += 1
+    if ticksSinceCurrentShift >= 4500 {
+        if Float.random(in: 0..<1) < 0.3 {
+            currentDir = .zero
+        } else {
+            currentDir = SIMD3<Float>(Float.random(in: -1...1), Float.random(in: -1...1), Float.random(in: -0.3...0.3))
+        }
+        ticksSinceCurrentShift = 0
+    }
+    if simd_length(currentDir) > 1e-4 {
+        world.applyCurrent(currentDir, strength: 0.6)
+    }
+    // Periodic immigration so the tank never goes extinct or monoculture.
+    if n > 0 && n % 1800 == 0 && world.colony.organismCount < 30 {
+        world.injectImmigrants(count: 3)
     }
     if cli.selectEvery > 0 && n > 0 && n % cli.selectEvery == 0 {
         let beforeOrg = world.colony.organismCount

@@ -117,4 +117,33 @@ public struct World {
             chemistry.deposit(at: p, amount: amount, sigma: sigma)
         }
     }
+
+    /// Inject K new "immigrant" organisms with fresh random genomes, each
+    /// starting as a single cell at a random position. Keeps an
+    /// everlasting tank from converging to a monoculture or going extinct.
+    public mutating func injectImmigrants(count n: Int, initialEnergy: Float = 1.5) {
+        for _ in 0..<n {
+            let genome = Genome.random(shape: genomeShape, rng: &rng, gain: 1.6)
+            let oid = colony.registerOrganism(genome: genome)
+            let p = SIMD3<Float>(
+                Float(rng.nextUnit()) * bounds.x,
+                Float(rng.nextUnit()) * bounds.y,
+                Float(rng.nextUnit()) * bounds.z
+            )
+            colony.spawn(at: p, organismId: oid, initialEnergy: initialEnergy)
+        }
+    }
+
+    /// Apply a soft drifting current to all cells — simulates a moving water
+    /// body. Magnitude is gentle; only nudges cells, doesn't override their
+    /// own contractions. Direction can change over wall time.
+    public mutating func applyCurrent(_ direction: SIMD3<Float>, strength: Float) {
+        let d = simd_length(direction)
+        guard d > 1e-4 else { return }
+        let unit = direction / d
+        let impulse = unit * strength * Float(fixedDt)
+        for i in 0..<colony.cells.count {
+            colony.applyImpulse(at: i, impulse: impulse)
+        }
+    }
 }
