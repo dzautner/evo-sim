@@ -105,6 +105,42 @@ public struct Colony {
         cells[i].energy = -1  // negative → metabolism check kills it next tick
     }
 
+    /// Periodic tournament-selection pressure. Computes a per-organism fitness
+    /// (cell count × avg energy × sqrt(age)), keeps the top `keepFraction`,
+    /// kills the rest. Surviving lineages continue to bud + mutate normally.
+    ///
+    /// This is *evolutionary* pressure — not a hardcoded behaviour. The
+    /// genome itself is untouched; we only choose which genomes get to
+    /// continue. The selection criterion (survive + grow) is the same
+    /// criterion biology imposes via the environment, just accelerated.
+    public mutating func applySelectionPressure(keepFraction: Float = 0.4) {
+        guard organismCount > 4 else { return }
+
+        // Aggregate per organism.
+        struct OrgStat { var oid: UInt32; var cellCount: Int; var totalEnergy: Float }
+        var stats: [UInt32: OrgStat] = [:]
+        stats.reserveCapacity(organismCount)
+        for c in cells {
+            var s = stats[c.organismId] ?? OrgStat(oid: c.organismId, cellCount: 0, totalEnergy: 0)
+            s.cellCount += 1
+            s.totalEnergy += max(0, c.energy)
+            stats[c.organismId] = s
+        }
+        let scored: [(UInt32, Float)] = stats.values.map { s in
+            let age = organisms[s.oid]?.ageTicks ?? 1
+            let fitness = Float(s.cellCount) * (s.totalEnergy / Float(s.cellCount)) * sqrt(Float(age) + 1)
+            return (s.oid, fitness)
+        }.sorted { $0.1 > $1.1 }
+
+        let keep = max(2, Int(Float(scored.count) * keepFraction))
+        let survivors = Set(scored.prefix(keep).map { $0.0 })
+
+        // Kill cells whose organism didn't survive selection.
+        for i in 0..<cells.count where !survivors.contains(cells[i].organismId) {
+            cells[i].energy = -1
+        }
+    }
+
     public mutating func registerOrganism(genome: Genome) -> UInt32 {
         let oid = nextOrganismId; nextOrganismId &+= 1
         organisms[oid] = Organism(id: oid, genome: genome)

@@ -23,6 +23,8 @@ struct CLI {
     var foodEvery: Int = 180
     var trailFrames: Int = 0     // 0 = off
     var trailEvery: Int = 6      // capture every N ticks (so trail covers trailFrames * trailEvery ticks)
+    var selectEvery: Int = 0     // 0 = off — tournament-selection cadence
+    var keepFraction: Float = 0.4
     var out: String = "snapshot.png"
 
     static func parse(_ args: [String]) -> CLI {
@@ -41,6 +43,8 @@ struct CLI {
             case "--food-every":  if let v = nextVal(), let n = Int(v) { c.foodEvery = n; i += 1 }
             case "--trail":       if let v = nextVal(), let n = Int(v) { c.trailFrames = n; i += 1 }
             case "--trail-every": if let v = nextVal(), let n = Int(v) { c.trailEvery = max(1, n); i += 1 }
+            case "--select-every": if let v = nextVal(), let n = Int(v) { c.selectEvery = max(0, n); i += 1 }
+            case "--keep":        if let v = nextVal(), let n = Float(v) { c.keepFraction = max(0.1, min(0.95, n)); i += 1 }
             case "--out":         if let v = nextVal() { c.out = v; i += 1 }
             case "-h", "--help":
                 print("EvoSimSnapshot [--seed N] [--steps N] [--width W] [--height H] [--organisms N] [--food N] [--food-every N] [--trail K] [--trail-every K] [--out path.png]")
@@ -69,6 +73,13 @@ let t0 = Date()
 for n in 0..<cli.steps {
     if cli.foodEvery > 0 && n > 0 && n % cli.foodEvery == 0 {
         world.sprinkleFood(count: cli.foodPerSprinkle, amount: 220, sigma: 4.5)
+    }
+    if cli.selectEvery > 0 && n > 0 && n % cli.selectEvery == 0 {
+        let beforeOrg = world.colony.organismCount
+        world.colony.applySelectionPressure(keepFraction: cli.keepFraction)
+        if n % (cli.selectEvery * 4) == 0 {
+            print("[snapshot] selection @ tick \(n): \(beforeOrg) → keep \(Int(Float(beforeOrg) * cli.keepFraction))")
+        }
     }
     world.tick()
     if cli.trailFrames > 0 && n % cli.trailEvery == 0 {
