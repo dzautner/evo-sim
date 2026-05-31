@@ -28,6 +28,7 @@ struct CLI {
     var motionBias: Float = 0.0      // selection: weight displacement
     var chemotaxisBias: Float = 0.0  // selection: weight being near food
     var predationBias: Float = 0.0   // selection: weight cumulative drained
+    var chaseBias: Float = 0.0       // selection: predators chase / prey flee
     var grid: Int = 0            // 0 = single image; >0 = N×N grid time-lapse
     var gifFrames: Int = 0       // 0 = off; >0 = capture this many GIF frames
     var gifDelay: Double = 0.05  // seconds between frames (1/20s)
@@ -57,6 +58,7 @@ struct CLI {
             case "--motion-bias": if let v = nextVal(), let n = Float(v) { c.motionBias = max(0, n); i += 1 }
             case "--chemotaxis-bias": if let v = nextVal(), let n = Float(v) { c.chemotaxisBias = max(0, n); i += 1 }
             case "--predation-bias": if let v = nextVal(), let n = Float(v) { c.predationBias = max(0, n); i += 1 }
+            case "--chase-bias": if let v = nextVal(), let n = Float(v) { c.chaseBias = max(0, n); i += 1 }
             case "--grid":        if let v = nextVal(), let n = Int(v) { c.grid = max(0, n); i += 1 }
             case "--gif":         if let v = nextVal(), let n = Int(v) { c.gifFrames = max(0, n); i += 1 }
             case "--gif-delay":   if let v = nextVal(), let n = Double(v) { c.gifDelay = max(0.01, n); i += 1 }
@@ -152,6 +154,7 @@ for n in 0..<cli.steps {
             motionBias: cli.motionBias,
             chemotaxisBias: cli.chemotaxisBias,
             predationBias: cli.predationBias,
+            chaseBias: cli.chaseBias,
             chemistry: world.chemistry
         )
         if n % (cli.selectEvery * 4) == 0 {

@@ -132,6 +132,7 @@ public struct Colony {
         motionBias: Float = 0.0,
         chemotaxisBias: Float = 0.0,
         predationBias: Float = 0.0,
+        chaseBias: Float = 0.0,
         chemistry: NutrientField? = nil
     ) {
         guard organismCount > 4 else { return }
@@ -182,7 +183,30 @@ public struct Colony {
             // Predation success: cumulative energy drained from other orgs.
             let drained = organisms[s.oid]?.totalDrained ?? 0
             let predationFit = drained * predationBias
-            return (s.oid, survivalFitness + motion + chemo + predationFit)
+            // Co-evolution proximity term:
+            //   - predators (high drained) → bonus for being near other orgs
+            //   - prey (low drained)       → bonus for distance from others
+            var chase: Float = 0
+            if chaseBias > 0 {
+                var nearestD2: Float = .greatestFiniteMagnitude
+                for other in stats.values where other.oid != s.oid {
+                    let dp = other.meanPos - s.meanPos
+                    let d2 = simd_dot(dp, dp)
+                    if d2 < nearestD2 { nearestD2 = d2 }
+                }
+                if nearestD2 < .greatestFiniteMagnitude {
+                    let nearestD = nearestD2.squareRoot()
+                    // Higher drained → more "predator-y", wants small distance.
+                    let predator01 = min(1, drained * 0.05)
+                    // chase = chaseBias × (predator wants short / prey wants long)
+                    let proximityReward = 1.0 / (1 + nearestD * 0.2)  // near = bigger
+                    let distanceReward = nearestD * 0.05              // far = bigger
+                    chase = chaseBias * (predator01 * proximityReward
+                                         + (1 - predator01) * distanceReward)
+                    chase *= Float(s.cellCount)
+                }
+            }
+            return (s.oid, survivalFitness + motion + chemo + predationFit + chase)
         }.sorted { $0.1 > $1.1 }
 
         let keep = max(2, Int(Float(scored.count) * keepFraction))
