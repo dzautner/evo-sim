@@ -1,0 +1,113 @@
+# evo-sim
+
+Open-ended evolution sandbox. Single cells in a chemistry soup evolve into
+multicellular creatures with truly emergent morphology. macOS dev target, iOS
+later. Tamagotchi feel: user is a Black-&-White-style "hand" that drops food
+and manipulates the environment.
+
+## Hard design commitments
+
+These are non-negotiable and override any "reasonable simplification":
+
+1. **No body-part library, ever.** No code anywhere names "limb", "leg",
+   "head", "eye", "mouth", or any anatomical part. Bodies are colonies of
+   undifferentiated cells whose specializations emerge from the genome's
+   developmental program. If a future change would introduce a body-part
+   template, stop and ask.
+2. **Genome = developmental program, not blueprint.** The genome encodes
+   per-cell decision rules (divide / die / differentiate / contract / secrete).
+   Macroscopic morphology is an emergent side-effect of these rules running in
+   an environment. Two identical genomes in two different environments must be
+   able to grow into noticeably different bodies.
+3. **Selection acts on whole-organism viability only.** Fitness = survival +
+   reproduction. Never reward intermediate features ("has a protrusion",
+   "moves fast"). The environment does the selecting.
+4. **Environment is a first-class morphogen.** Nutrient gradients, light,
+   currents, mechanical stress, neighbor signals all feed into cell decisions.
+   Cells must be able to read their local environment.
+5. **Start from one cell in a chemistry soup.** Multicellularity itself has
+   to evolve. Do not seed embryos.
+
+## Architecture (locked)
+
+- **Language/platform:** Swift, macOS first (fast iteration), iOS port later.
+  Core simulation is a cross-platform Swift Package; apps are thin shells.
+- **Genome:** Neural Cellular Automaton — each cell runs a small shared NN on
+  `(own state vector, mean neighbor state, local chemistry, mechanical stress)`
+  → outputs `(division signal, differentiation update, spring stiffness,
+  contraction signal, secretion)`. Mutation = weight perturbation +
+  occasional topology change. Whole organism shares one NN (one genome).
+- **Physics:** 3D soft body. Cells are mass-points; bonds between
+  recently-divided / nearby cells are damped springs whose rest length and
+  stiffness are genome-controlled per-cell. Muscles = springs that contract on
+  neural signal. Integrator: semi-implicit Euler at fixed timestep.
+- **Chemistry:** 3D scalar fields on a coarse grid (nutrients, signaling
+  molecules, oxygen-analog, waste). Diffusion + decay + cell uptake/secretion.
+  Cells sample their grid cell.
+- **Behavior:** Once motor/sensor cells exist (because the genome
+  differentiated some cells into them), they wire into the same NCA — sensor
+  cells inject environmental readings into their state vector, motor cells
+  read a designated output channel to drive spring contraction.
+- **Ecosystem:** Many creatures coexist in one tank. Reproduction is asexual
+  with mutation (sexual later if it earns its place). Differential survival
+  drives evolution.
+- **Rendering:** Metal compute raymarching of an SDF metaball field over cell
+  positions. One soft light, translucent medium, depth fog. Goal: pond-water-
+  under-a-microscope vibe (Microcosmos, Panspermia). No meshes, no rigging —
+  cell positions ARE the geometry.
+- **Interaction:** Mouse/touch is the "hand". Drop food pellets, stir
+  currents, pick up creatures, alter light. No god-button shortcuts that
+  bypass the simulation.
+- **Time:** Real-time playback with 1× / 10× / 100× speedup. A "life" is
+  minutes; visible evolution over hours.
+
+## Phased build plan
+
+Each phase is independently shippable and visually verifiable.
+
+- **Phase 0 — Scaffolding.** Swift Package layout, macOS app shell, debug
+  2D top-down view (SwiftUI Canvas, no Metal yet), fixed-timestep sim loop.
+- **Phase 1 — Chemistry + single cells.** Nutrient field with diffusion. One
+  cell that uptakes, grows, divides on a hard-coded rule. Verify mass
+  conservation, stable diffusion.
+- **Phase 2 — Morphogenesis.** Replace hard-coded division with NCA genome.
+  Cells form stable multicellular blobs. Mutation + asexual reproduction.
+  Verify: two different random genomes grow visibly different bodies.
+- **Phase 3 — Soft-body physics.** Spring mesh between cells, semi-implicit
+  Euler. Genome controls spring stiffness. Verify: bodies deform under
+  gravity / currents, don't explode.
+- **Phase 4 — Behavior.** Sensor + motor cell types (still emergent from
+  genome — just additional output channels). Verify: some lineage discovers
+  directed motion toward food in <24h of sim time on one tank.
+- **Phase 5 — Ecosystem.** Many creatures, predation (cell-on-cell), open
+  world boundaries, hand interaction.
+- **Phase 6 — Metal raymarching.** Replace debug renderer with SDF metaball
+  raymarching. iOS target.
+
+Do not start a phase until the prior phase has a green visual verification.
+
+## Conventions
+
+- **Source layout:** `Sources/EvoSimCore/` (sim engine, platform-agnostic,
+  no UI imports), `Sources/EvoSimRender/` (Metal shaders + render pipeline),
+  `Apps/EvoSimMac/`, later `Apps/EvoSimIOS/`. Tests under `Tests/`.
+- **Determinism:** sim is deterministic given (seed, genome, initial
+  conditions). All RNG goes through an injected `RandomSource`. Never call
+  `Double.random()` or `Int.random()` directly inside the sim.
+- **No Foundation in the hot loop.** Sim core uses `simd_*` types, plain
+  arrays, no `Date`, no `String` allocations per step.
+- **Profiling-first.** Every sim subsystem has a microbenchmark in
+  `Tests/Bench/`. Target: 10k cells at 60 Hz on M-series.
+- **Visual verification is the test.** For sim behavior, prefer a recorded
+  short visual clip + assertion on summary stats over unit tests on
+  intermediate state. Cell-level state is not API.
+
+## Anti-patterns (will be rejected on sight)
+
+- Hardcoded body parts or "creature classes".
+- Direct fitness rewards for intermediate traits.
+- Per-cell `Foundation` allocations in the sim loop.
+- Non-deterministic RNG inside the sim.
+- Render code reaching into sim mutable state.
+- A "make it cool" shortcut that skips the simulation (e.g. procedurally
+  generating creature shapes for the demo).
