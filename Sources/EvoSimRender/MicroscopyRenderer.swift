@@ -173,8 +173,14 @@ public struct MicroscopyRenderer {
         let influencePxY = (rWorld * 1.6) * pxPerUnitY
 
         for org in orgs {
-            // Gather projected cell positions for this org.
-            struct ProjCell { var px: Float; var py: Float; var z: Float; var energy: Float; var nucleus: Bool }
+            // Gather projected cell positions for this org with their
+            // per-cell predation signal (so the renderer can show local
+            // "mouth" regions wherever predation is active).
+            struct ProjCell {
+                var px: Float; var py: Float; var z: Float
+                var energy: Float
+                var predation: Float
+            }
             var projected: [ProjCell] = []
             projected.reserveCapacity(org.cellIdx.count)
             var bbMinX = Float.greatestFiniteMagnitude, bbMinY = Float.greatestFiniteMagnitude
@@ -183,9 +189,12 @@ public struct MicroscopyRenderer {
                 let c = world.colony.cells[i]
                 let pX = wx2px(c.position.x)
                 let pY = wy2py(c.position.y)
+                let pred = world.colony.predation.indices.contains(i)
+                    ? max(0, world.colony.predation[i]) : 0
                 projected.append(ProjCell(
                     px: pX, py: pY, z: c.position.z,
-                    energy: c.energy, nucleus: true
+                    energy: c.energy,
+                    predation: pred
                 ))
                 bbMinX = min(bbMinX, pX - influencePxX)
                 bbMinY = min(bbMinY, pY - influencePxY)
@@ -231,6 +240,11 @@ public struct MicroscopyRenderer {
                 for px in x0...x1 {
                     let qx = Float(px), qy = Float(py)
                     var field: Float = 0
+                    // Per-pixel predation intensity from nearby cells —
+                    // weighted by inverse distance so the hotspot is
+                    // localized to the active predator cell.
+                    var predField: Float = 0
+                    var predWeight: Float = 0
                     for c in projected {
                         let dx = c.px - qx
                         let dy = c.py - qy
@@ -238,8 +252,15 @@ public struct MicroscopyRenderer {
                         if d2 > influence2 * 4 { continue }  // cull
                         let v: Float = max(0, 1 - d2 / (influence2 * 1.2))
                         field += v * v
+                        if c.predation > 0.05 {
+                            let w = v * v
+                            predField += c.predation * w
+                            predWeight += w
+                        }
                     }
                     if field < surfaceThreshold * 0.35 { continue }
+                    let predLocal: Float = predWeight > 0
+                        ? min(1, predField / predWeight) : 0
 
                     let idx = 4 * (px + py * w)
                     let bgR = Float(pixels[idx + 0]) / 255
@@ -252,9 +273,15 @@ public struct MicroscopyRenderer {
                         let wx = (viewMinX + qx / pxPerUnitX)
                         let wy = (viewMinY + qy / pxPerUnitY)
                         let texN = Self.fbm(wx * 1.6, wy * 1.6, 0x33, octaves: 3)
-                        let interior = bodyCol * (0.88 + texN * 0.25)
-                        // Interior is translucent so background grain shows
-                        // through — keeps it from looking like flat paint.
+                        var interior = bodyCol * (0.88 + texN * 0.25)
+                        // MOUTH GLOW: cells actively predating tint this
+                        // region red-warm. Localized — a mouth on one end
+                        // of the body is visually distinct from the rest.
+                        if predLocal > 0.05 {
+                            let mouthCol = SIMD3<Float>(0.55, 0.08, 0.06)
+                            let t = min(1, predLocal * 1.8)
+                            interior = mix(interior, mouthCol, t: t)
+                        }
                         let alphaInner: Float = 0.78
                         pixels[idx + 0] = toByte(bgR * (1 - alphaInner) + interior.x * alphaInner)
                         pixels[idx + 1] = toByte(bgG * (1 - alphaInner) + interior.y * alphaInner)
