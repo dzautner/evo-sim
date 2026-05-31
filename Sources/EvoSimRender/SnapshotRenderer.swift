@@ -19,6 +19,7 @@ public struct SnapshotRenderer {
     public var sliceMode: SliceMode
     public var nutrientGain: Float
     public var cellRadiusPx: Float
+    public var drawBonds: Bool = true
 
     public enum SliceMode {
         /// Integrate concentration along the Z axis. Gives an X-ray look.
@@ -31,8 +32,8 @@ public struct SnapshotRenderer {
         width: Int = 720,
         height: Int = 720,
         sliceMode: SliceMode = .zSum,
-        nutrientGain: Float = 1.6,
-        cellRadiusPx: Float = 9
+        nutrientGain: Float = 0.85,
+        cellRadiusPx: Float = 7
     ) {
         self.width = width
         self.height = height
@@ -128,6 +129,25 @@ public struct SnapshotRenderer {
             Float(ny) * cf.cellSize
         )
         let pxPerUnit = SIMD2<Float>(Float(w) / worldExtent.x, Float(h) / worldExtent.y)
+
+        // 3a. Bonds first, behind cells.
+        if drawBonds, !world.colony.bonds.isEmpty {
+            var idToScreen = [UInt32: SIMD2<Float>]()
+            idToScreen.reserveCapacity(world.colony.cells.count)
+            for c in world.colony.cells {
+                idToScreen[c.id] = SIMD2<Float>(c.position.x * pxPerUnit.x, c.position.y * pxPerUnit.y)
+            }
+            for bond in world.colony.bonds {
+                guard let pa = idToScreen[bond.a], let pb = idToScreen[bond.b] else { continue }
+                // Brighter / cooler-toned line for stiffer bond — pops
+                // against the amber chemistry background.
+                let alpha: Float = min(1, 0.35 + bond.stiffness * 0.18)
+                drawLine(into: &pixels, w: w, h: h,
+                         x0: pa.x, y0: pa.y, x1: pb.x, y1: pb.y,
+                         color: SIMD3<Float>(0.85, 0.95, 1.0), alpha: alpha)
+            }
+        }
+
         for cell in world.colony.cells {
             let px = cell.position.x * pxPerUnit.x
             let py = cell.position.y * pxPerUnit.y
@@ -226,5 +246,42 @@ public struct SnapshotRenderer {
     @inline(__always)
     private func mix(_ a: SIMD3<Float>, _ b: SIMD3<Float>, t: Float) -> SIMD3<Float> {
         a + (b - a) * t
+    }
+
+    private func drawLine(
+        into pixels: inout [UInt8], w: Int, h: Int,
+        x0: Float, y0: Float, x1: Float, y1: Float,
+        color: SIMD3<Float>, alpha: Float
+    ) {
+        // Wu-ish: rasterise along the major axis with linear alpha for the
+        // off-axis pixel. Cheap, good enough for thin bond lines.
+        let dx = x1 - x0
+        let dy = y1 - y0
+        let steps = max(abs(dx), abs(dy))
+        if steps < 0.5 { return }
+        let n = Int(steps.rounded(.up))
+        for s in 0...n {
+            let t = Float(s) / Float(n)
+            let x = x0 + dx * t
+            let y = y0 + dy * t
+            blendPixel(into: &pixels, w: w, h: h, x: x, y: y, color: color, alpha: alpha)
+        }
+    }
+
+    private func blendPixel(
+        into pixels: inout [UInt8], w: Int, h: Int,
+        x: Float, y: Float, color: SIMD3<Float>, alpha: Float
+    ) {
+        let xi = Int(x.rounded()), yi = Int(y.rounded())
+        guard xi >= 0, xi < w, yi >= 0, yi < h else { return }
+        let n = 4 * (xi + yi * w)
+        let r = Float(pixels[n + 0]) / 255
+        let g = Float(pixels[n + 1]) / 255
+        let b = Float(pixels[n + 2]) / 255
+        let a = min(1, max(0, alpha))
+        pixels[n + 0] = toByte(r * (1 - a) + color.x * a)
+        pixels[n + 1] = toByte(g * (1 - a) + color.y * a)
+        pixels[n + 2] = toByte(b * (1 - a) + color.z * a)
+        pixels[n + 3] = 255
     }
 }

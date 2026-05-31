@@ -46,13 +46,17 @@ public enum NCAInput {
 /// Index conventions for the output vector the NCA emits per cell.
 /// Outputs are passed through tanh, then interpreted by Colony.applyOutputs.
 public enum NCAOutput {
-    /// Layout: [Δstate (stateCh) | divide (1) | bud (1) | die (1) | divDir (3)]
-    public static let divideIdx = 0   // after stateCh
-    public static let budIdx    = 1
-    public static let dieIdx    = 2
-    public static let divDirIdx = 3   // 3 components
+    /// Layout (all indices are AFTER the `stateCh` Δstate block):
+    ///   divide (1) | bud (1) | die (1) | divDir (3) |
+    ///   bondStiffness (1) | contraction (1)
+    public static let divideIdx       = 0
+    public static let budIdx          = 1
+    public static let dieIdx          = 2
+    public static let divDirIdx       = 3   // 3 components
+    public static let bondStiffnessIdx = 6
+    public static let contractionIdx   = 7
 
-    public static let nonStateChannels = 6  // divide + bud + die + 3 dir
+    public static let nonStateChannels = 8
 
     public static func size(stateChannels: Int) -> Int {
         stateChannels + nonStateChannels

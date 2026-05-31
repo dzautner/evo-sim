@@ -23,8 +23,16 @@ public struct Organism {
 public struct Colony {
     public private(set) var cells: [Cell]
     public private(set) var organisms: [UInt32: Organism]
+    public private(set) var bonds: [Bond] = []
+    /// Parallel to `cells`: velocity used by the soft-body integrator.
+    public private(set) var velocities: [SIMD3<Float>] = []
+    /// Parallel to `cells`: normalised mechanical stress (|net bond force|),
+    /// fed back to the NCA on the next tick as a proprioceptive input.
+    public private(set) var stress: [Float] = []
     public private(set) var nextCellId: UInt32 = 1
     public private(set) var nextOrganismId: UInt32 = 1
+
+    public var integrator: SoftBodyIntegrator = SoftBodyIntegrator()
 
     // Tunables — these are physics / metabolic constants, not evolved traits.
     public var uptakeRate: Float = 1.2           // nutrient → energy per second
@@ -73,20 +81,24 @@ public struct Colony {
         var c = Cell(id: id, organismId: organismId, position: position)
         c.energy = initialEnergy
         cells.append(c)
+        velocities.append(.zero)
+        stress.append(0)
         return id
     }
 
     /// Main per-tick step. Order:
-    ///   1. Rebuild spatial index.
-    ///   2. For each cell: compute NCA input from local state, gather
-    ///      neighbours' mean state, sample chemistry + gradient, forward
-    ///      pass, apply Δstate, decide divide / bud / die.
-    ///   3. Uptake from chemistry, subtract metabolic cost.
-    ///   4. Apply pending births and deaths.
+    ///   1. Rebuild spatial index from current positions.
+    ///   2. For each cell: NCA forward (input includes last-tick stress),
+    ///      decide Δstate / divide / bud / die, queue births.
+    ///   3. Apply Δstate, uptake, metabolism.
+    ///   4. Apply births (new cells + parent-daughter bonds).
+    ///   5. Prune dead cells and bonds.
+    ///   6. Soft-body integrator: spring + drag + boundary; updates stress.
     public mutating func tick(
         dt: Float,
         chemistry: inout NutrientField,
         index: inout SpatialIndex,
+        bounds: SIMD3<Float>,
         rng: inout Xoshiro256
     ) {
         guard !cells.isEmpty, !organisms.isEmpty else { return }
@@ -109,8 +121,18 @@ public struct Colony {
 
         // Pending mutations to apply after the read pass (don't mutate cells
         // we're iterating).
-        struct PendingBirth { var organismId: UInt32; var position: SIMD3<Float>; var inheritedState: [Float] }
-        struct PendingMutBirth { var parentOrganismId: UInt32; var position: SIMD3<Float>; var inheritedState: [Float] }
+        struct PendingBirth {
+            var organismId: UInt32
+            var parentId: UInt32     // for bond creation
+            var position: SIMD3<Float>
+            var inheritedState: [Float]
+            var bondStiffness: Float // from parent's NCA output at division time
+        }
+        struct PendingMutBirth {
+            var parentOrganismId: UInt32
+            var position: SIMD3<Float>
+            var inheritedState: [Float]
+        }
         var newCells: [PendingBirth] = []
         var newBuds: [PendingMutBirth] = []
         var deaths = Set<Int>()
@@ -152,8 +174,8 @@ public struct Colony {
             inputBuf[2 * stateCh + 1] = gradX
             inputBuf[2 * stateCh + 2] = gradY
             inputBuf[2 * stateCh + 3] = gradZ
-            inputBuf[2 * stateCh + 4] = 0  // stress placeholder (Phase 3)
-            inputBuf[2 * stateCh + 5] = 1  // bias
+            inputBuf[2 * stateCh + 4] = stress[ci]  // mechanical stress from prev tick
+            inputBuf[2 * stateCh + 5] = 1           // bias
 
             // Forward pass uses organism's workspace.
             var ws = org.workspace
@@ -216,16 +238,23 @@ public struct Colony {
                 daughterState[0] = daughterShare
 
                 if budSig > budThreshold {
+                    // Budding → new organism, no physical bond to parent.
                     newBuds.append(PendingMutBirth(
                         parentOrganismId: cell.organismId,
                         position: daughterPos,
                         inheritedState: daughterState
                     ))
                 } else {
+                    // Same-organism division → physical bond inherits the
+                    // parent's bondStiffness output (mapped to [0.3, 2.7]).
+                    let stiffSig = outputBuf[stateCh + NCAOutput.bondStiffnessIdx]
+                    let stiffness = 1.5 + stiffSig * 1.2
                     newCells.append(PendingBirth(
                         organismId: cell.organismId,
+                        parentId: cell.id,
                         position: daughterPos,
-                        inheritedState: daughterState
+                        inheritedState: daughterState,
+                        bondStiffness: stiffness
                     ))
                 }
             }
@@ -247,10 +276,17 @@ public struct Colony {
             cells[ci].age &+= 1
         }
 
-        // 4. Apply births.
+        // 4. Apply births (same-organism divisions → parent-daughter bond;
+        //    buds → new organism with mutated genome, no physical bond).
         for b in newCells {
-            spawn(at: b.position, organismId: b.organismId, initialEnergy: b.inheritedState[0])
+            let daughterId = spawn(at: b.position, organismId: b.organismId, initialEnergy: b.inheritedState[0])
             cells[cells.count - 1].state = b.inheritedState
+            bonds.append(Bond(
+                a: b.parentId,
+                b: daughterId,
+                restLength: budSpacing,
+                stiffness: b.bondStiffness
+            ))
         }
         for b in newBuds {
             guard let parent = organisms[b.parentOrganismId] else { continue }
@@ -264,21 +300,59 @@ public struct Colony {
             cells[cells.count - 1].state = b.inheritedState
         }
 
-        // 5. Age organisms; prune dead cells; drop organisms with no cells.
+        // 5. Age organisms; prune dead cells + their parallel arrays; drop
+        //    organisms with no cells; drop bonds touching removed cells.
         for (oid, var o) in organisms {
             o.ageTicks &+= 1
             organisms[oid] = o
         }
         if !deaths.isEmpty {
-            var kept: [Cell] = []
-            kept.reserveCapacity(cells.count - deaths.count)
-            for (i, c) in cells.enumerated() where !deaths.contains(i) { kept.append(c) }
-            cells = kept
+            var keptCells: [Cell] = []
+            var keptVel: [SIMD3<Float>] = []
+            var keptStress: [Float] = []
+            keptCells.reserveCapacity(cells.count - deaths.count)
+            keptVel.reserveCapacity(cells.count - deaths.count)
+            keptStress.reserveCapacity(cells.count - deaths.count)
+            var deadIds = Set<UInt32>()
+            for i in 0..<cells.count {
+                if deaths.contains(i) {
+                    deadIds.insert(cells[i].id)
+                } else {
+                    keptCells.append(cells[i])
+                    keptVel.append(velocities[i])
+                    keptStress.append(stress[i])
+                }
+            }
+            cells = keptCells
+            velocities = keptVel
+            stress = keptStress
+            if !deadIds.isEmpty {
+                bonds.removeAll { deadIds.contains($0.a) || deadIds.contains($0.b) }
+            }
         }
         var liveOrgs = Set<UInt32>()
         for c in cells { liveOrgs.insert(c.organismId) }
         for oid in organisms.keys where !liveOrgs.contains(oid) {
             organisms.removeValue(forKey: oid)
+        }
+
+        // 6. Soft-body physics. Builds idIndex once so the integrator can
+        //    resolve bond endpoints in O(1).
+        if !cells.isEmpty {
+            var positions = cells.map { $0.position }
+            var idIndex: [UInt32: Int] = [:]
+            idIndex.reserveCapacity(cells.count)
+            for (i, c) in cells.enumerated() { idIndex[c.id] = i }
+            integrator.integrate(
+                positions: &positions,
+                velocities: &velocities,
+                stress: &stress,
+                bonds: &bonds,
+                idIndex: idIndex,
+                bounds: bounds,
+                dt: dt
+            )
+            for i in 0..<cells.count { cells[i].position = positions[i] }
         }
     }
 

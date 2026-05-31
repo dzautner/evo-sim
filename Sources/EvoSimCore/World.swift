@@ -40,7 +40,7 @@ public struct World {
 
     public mutating func tick() {
         let dt = Float(fixedDt)
-        colony.tick(dt: dt, chemistry: &chemistry, index: &spatial, rng: &rng)
+        colony.tick(dt: dt, chemistry: &chemistry, index: &spatial, bounds: bounds, rng: &rng)
         chemistry.diffuse(dt: dt)
         step &+= 1
         time += fixedDt

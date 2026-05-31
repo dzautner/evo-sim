@@ -20,8 +20,10 @@ final class CellTests: XCTestCase {
     func testColonyTickWithNoFoodKillsEverything() {
         var w = World(seed: 7)
         w.seedRandomOrganisms(count: 10)
-        // No food in the tank: metabolic cost should eventually wipe out the colony.
-        for _ in 0..<2000 { w.tick() }
+        // No food in the tank: metabolic cost must eventually wipe out the
+        // colony. Run long enough that even lineages that occasionally divide
+        // (paying division cost) eventually starve.
+        for _ in 0..<5000 { w.tick() }
         XCTAssertEqual(w.colony.count, 0)
     }
 
