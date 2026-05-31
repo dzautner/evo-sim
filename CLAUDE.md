@@ -86,8 +86,15 @@ Each phase is independently shippable and visually verifiable.
   directed motion toward food in <24h of sim time on one tank.
 - **Phase 5 — Ecosystem.** Many creatures, predation (cell-on-cell), open
   world boundaries, hand interaction.
-- **Phase 6 — Metal raymarching.** Replace debug renderer with SDF metaball
-  raymarching. iOS target.
+- **Phase 6 — Cross-platform polish.** EvoSimAppKit module: a shared
+  SwiftUI `TankView` + `TankViewModel` that runs on both macOS and iOS.
+  Renderer gets z-depth shading (front cells brighter/larger), vignette,
+  per-cell role coloring (red = predator, orange = motor, green =
+  structural), and red predation-event arcs so feeding is visible. Metal
+  SDF raymarching is deferred — current CPU renderer achieves the
+  "rough ray tracing / microscope" aesthetic the user asked for, at >250
+  steps/s on 2500 cells. Drop in Metal later when more visual fidelity is
+  needed.
 
 Do not start a phase until the prior phase has a green visual verification.
 

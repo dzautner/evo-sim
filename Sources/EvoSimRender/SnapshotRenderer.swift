@@ -20,9 +20,13 @@ public struct SnapshotRenderer {
     public var nutrientGain: Float
     public var cellRadiusPx: Float
     public var drawBonds: Bool = true
-    /// Color cells by hash(organismId). Useful in Phase 5+ ecosystems where
-    /// many lineages compete. Off-by-default = uniform amber/white.
-    public var colorByOrganism: Bool = true
+    public enum ColorMode { case uniform, organism, role }
+    /// `.role`: cells colored by their dominant NCA output channel —
+    ///   red = predator, orange = motor, cyan = divider, green = structure.
+    ///   Visualises emergent "organs" inside organisms.
+    /// `.organism`: hash(organismId) → hue. Visualises distinct lineages.
+    /// `.uniform`: amber/white.
+    public var colorMode: ColorMode = .role
     /// Optional motion trail: oldest → newest frames of (cellId, position).
     /// Rendered behind cells as fading dots so locomotion shows in a still.
     public var trailFrames: [[(UInt32, SIMD3<Float>)]] = []
@@ -176,25 +180,98 @@ public struct SnapshotRenderer {
             }
         }
 
-        for cell in world.colony.cells {
+        // Z-sort back to front so cells in front of the tank cleanly overlap
+        // those behind them. Z-depth also modulates radius + brightness so
+        // the projection acquires a "microscope focus" feel.
+        let tankZ = Float(nz) * cf.cellSize
+
+        // Build cell index → (predation, contraction) so we can role-color.
+        var roleP = [UInt32: Float]()
+        var roleC = [UInt32: Float]()
+        roleP.reserveCapacity(world.colony.cells.count)
+        roleC.reserveCapacity(world.colony.cells.count)
+        for (i, c) in world.colony.cells.enumerated() {
+            roleP[c.id] = world.colony.predation.indices.contains(i) ? world.colony.predation[i] : 0
+            roleC[c.id] = world.colony.contraction.indices.contains(i) ? world.colony.contraction[i] : 0
+        }
+
+        var sortedCells = world.colony.cells
+        sortedCells.sort { $0.position.z < $1.position.z }
+        for cell in sortedCells {
             let px = cell.position.x * pxPerUnit.x
             let py = cell.position.y * pxPerUnit.y
             let energyHeat = 1.0 - expf(-cell.energy * 0.5)
-            let radius = cellRadiusPx + energyHeat * 2.5
+            let zNorm = max(0, min(1, cell.position.z / tankZ))
+            let depthScale = 0.7 + 0.6 * zNorm
+            let depthBright: Float = 0.55 + 0.45 * zNorm
+            let radius = (cellRadiusPx + energyHeat * 2.5) * depthScale
             let core: SIMD3<Float>
             let glow: SIMD3<Float>
-            if colorByOrganism {
-                let hue = organismHue(cell.organismId)
-                let glowC = hsvToRgb(h: hue, s: 0.85, v: 1.0)
-                let coreC = mix(glowC, SIMD3<Float>(1, 1, 1), t: 0.65)
+            switch colorMode {
+            case .role:
+                let p = max(0, roleP[cell.id] ?? 0)
+                let m = max(0, roleC[cell.id] ?? 0)
+                // Role mix: red for predation, orange for motor, green default.
+                let predatorCol = SIMD3<Float>(1.0, 0.18, 0.18)
+                let motorCol    = SIMD3<Float>(1.0, 0.55, 0.10)
+                let structCol   = SIMD3<Float>(0.45, 0.95, 0.55)
+                let pw = min(1, p * 1.6)
+                let mw = min(1, m * 1.6)
+                let totalW = pw + mw
+                let baseCol: SIMD3<Float>
+                if totalW < 0.05 {
+                    baseCol = structCol
+                } else {
+                    let pn = pw / max(0.001, totalW)
+                    let mn = mw / max(0.001, totalW)
+                    let active = predatorCol * pn + motorCol * mn
+                    baseCol = mix(structCol, active, t: min(1, totalW))
+                }
+                let glowC = baseCol * depthBright
+                let coreC = mix(glowC, SIMD3<Float>(1, 1, 1), t: 0.55)
                 core = coreC
                 glow = glowC
-            } else {
-                core = SIMD3<Float>(1.0, 0.95, 0.85)
-                glow = SIMD3<Float>(1.0, 0.55, 0.25)
+            case .organism:
+                let hue = organismHue(cell.organismId)
+                let glowC = hsvToRgb(h: hue, s: 0.85, v: 1.0) * depthBright
+                core = mix(glowC, SIMD3<Float>(1, 1, 1), t: 0.65)
+                glow = glowC
+            case .uniform:
+                core = SIMD3<Float>(1.0, 0.95, 0.85) * depthBright
+                glow = SIMD3<Float>(1.0, 0.55, 0.25) * depthBright
             }
             splat(into: &pixels, w: w, h: h, cx: px, cy: py, radius: radius,
                   core: core, glow: glow, energy: energyHeat)
+        }
+
+        // Predation flash: bright red arc from predator to prey for each
+        // event in flight. Older events fade.
+        for ev in world.colony.recentPredations {
+            let ageT = Float(ev.age) / Float(max(1, world.colony.predationEventLifetime))
+            let alpha = max(0, 0.85 * (1 - ageT))
+            let pa = SIMD2<Float>(ev.predator.x * pxPerUnit.x, ev.predator.y * pxPerUnit.y)
+            let pb = SIMD2<Float>(ev.prey.x * pxPerUnit.x, ev.prey.y * pxPerUnit.y)
+            drawLine(into: &pixels, w: w, h: h,
+                     x0: pa.x, y0: pa.y, x1: pb.x, y1: pb.y,
+                     color: SIMD3<Float>(1.0, 0.25, 0.18), alpha: alpha)
+        }
+
+        // Final pass: subtle vignette + chromatic aberration. Pushes the image
+        // toward "looking through a microscope eyepiece" without doing any
+        // actual raytracing.
+        let cx = Float(w) * 0.5, cy = Float(h) * 0.5
+        let maxR = sqrt(cx * cx + cy * cy)
+        for py in 0..<h {
+            for px in 0..<w {
+                let dx = Float(px) - cx
+                let dy = Float(py) - cy
+                let r = sqrt(dx * dx + dy * dy) / maxR
+                let vignette = 1 - r * r * 0.55
+                let n = 4 * (px + py * w)
+                pixels[n + 0] = toByte(Float(pixels[n + 0]) / 255 * vignette)
+                pixels[n + 1] = toByte(Float(pixels[n + 1]) / 255 * vignette)
+                pixels[n + 2] = toByte(Float(pixels[n + 2]) / 255 * vignette)
+            }
         }
 
         return pixels

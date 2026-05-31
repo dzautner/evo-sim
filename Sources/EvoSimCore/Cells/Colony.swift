@@ -39,6 +39,19 @@ public struct Colony {
     /// the predator drains energy on contact. Cell becomes a "mouth" only
     /// if its lineage discovers that this output is useful.
     public private(set) var predation: [Float] = []
+
+    /// Recent predation events (predator pos, prey pos, age in ticks). Ages
+    /// tick down each frame; events drop off after `predationEventLifetime`.
+    /// Renderer uses this to flash red arcs between hunter and prey so eating
+    /// is visible.
+    public struct PredationEvent {
+        public var predator: SIMD3<Float>
+        public var prey: SIMD3<Float>
+        public var amount: Float
+        public var age: Int
+    }
+    public private(set) var recentPredations: [PredationEvent] = []
+    public var predationEventLifetime: Int = 12
     public private(set) var nextCellId: UInt32 = 1
     public private(set) var nextOrganismId: UInt32 = 1
 
@@ -429,8 +442,14 @@ public struct Colony {
                         let taken = min(drain, cells[nj].energy)
                         cells[nj].energy -= taken
                         cells[i].energy  += taken * predationEfficiency
-                        // Slight push so prey is shoved.
                         externalForces[nj] += dir * predationPush * aI
+                        if taken > 0.005 {
+                            recentPredations.append(PredationEvent(
+                                predator: cells[i].position,
+                                prey: cells[nj].position,
+                                amount: taken, age: 0
+                            ))
+                        }
                     }
                     if aNJ > 0.2 && cells[i].energy > 0 {
                         let drain = predationRate * aNJ * dt
@@ -438,9 +457,21 @@ public struct Colony {
                         cells[i].energy  -= taken
                         cells[nj].energy += taken * predationEfficiency
                         externalForces[i] -= dir * predationPush * aNJ
+                        if taken > 0.005 {
+                            recentPredations.append(PredationEvent(
+                                predator: cells[nj].position,
+                                prey: cells[i].position,
+                                amount: taken, age: 0
+                            ))
+                        }
                     }
                 }
             }
+            // Age + cull predation events.
+            for n in 0..<recentPredations.count { recentPredations[n].age += 1 }
+            recentPredations.removeAll { $0.age > predationEventLifetime }
+        } else {
+            recentPredations.removeAll(keepingCapacity: true)
         }
 
         // 7. Soft-body physics.
