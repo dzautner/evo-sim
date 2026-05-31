@@ -30,6 +30,7 @@ struct CLI {
     var gifFrames: Int = 0       // 0 = off; >0 = capture this many GIF frames
     var gifDelay: Double = 0.05  // seconds between frames (1/20s)
     var raymarch: Bool = false   // use the 3D raymarch renderer
+    var microscopy: Bool = false // use the 2D cell-anatomy renderer
     var out: String = "snapshot.png"
 
     static func parse(_ args: [String]) -> CLI {
@@ -55,6 +56,7 @@ struct CLI {
             case "--gif":         if let v = nextVal(), let n = Int(v) { c.gifFrames = max(0, n); i += 1 }
             case "--gif-delay":   if let v = nextVal(), let n = Double(v) { c.gifDelay = max(0.01, n); i += 1 }
             case "--raymarch":    c.raymarch = true
+            case "--microscopy":  c.microscopy = true
             case "--out":         if let v = nextVal() { c.out = v; i += 1 }
             case "-h", "--help":
                 print("EvoSimSnapshot [--seed N] [--steps N] [--width W] [--height H] [--organisms N] [--food N] [--food-every N] [--trail K] [--trail-every K] [--out path.png]")
@@ -102,6 +104,7 @@ let gifInterval: Int = cli.gifFrames > 0
 var nextGifCapture = gifInterval - 1
 let gifMetaballRenderer = SnapshotRenderer(width: cli.width, height: cli.height)
 let gifRaymarchRenderer = RaymarchRenderer(width: cli.width, height: cli.height)
+let gifMicroscopyRenderer = MicroscopyRenderer(width: cli.width, height: cli.height)
 
 let t0 = Date()
 // Drifting current state — periodically shifts so the tank doesn't stagnate.
@@ -153,9 +156,14 @@ for n in 0..<cli.steps {
         nextGridCapture += gridFrameInterval
     }
     if cli.gifFrames > 0 && n >= nextGifCapture && gifFrames.count < cli.gifFrames {
-        let frame = cli.raymarch
-            ? gifRaymarchRenderer.renderRGBA(world)
-            : gifMetaballRenderer.renderRGBA(world)
+        let frame: [UInt8]
+        if cli.microscopy {
+            frame = gifMicroscopyRenderer.renderRGBA(world)
+        } else if cli.raymarch {
+            frame = gifRaymarchRenderer.renderRGBA(world)
+        } else {
+            frame = gifMetaballRenderer.renderRGBA(world)
+        }
         gifFrames.append(frame)
         nextGifCapture += gifInterval
     }
@@ -204,6 +212,16 @@ if cli.gifFrames > 0 && !gifFrames.isEmpty {
         exit(1)
     }
     print("[snapshot] wrote \(outURL.path) (\(totalW)×\(totalH) — \(gridN)×\(gridN) time-lapse)")
+} else if cli.microscopy {
+    let mr = MicroscopyRenderer(width: cli.width, height: cli.height)
+    let t1 = Date()
+    if !mr.writePNG(world, to: outURL) {
+        FileHandle.standardError.write(Data("failed to write \(outURL.path)\n".utf8))
+        exit(1)
+    }
+    let wall = Date().timeIntervalSince(t1)
+    print(String(format: "[snapshot] microscopy %d×%d in %.2fs → %@",
+                 cli.width, cli.height, wall, outURL.path))
 } else if cli.raymarch {
     let rm = RaymarchRenderer(width: cli.width, height: cli.height)
     let t1 = Date()

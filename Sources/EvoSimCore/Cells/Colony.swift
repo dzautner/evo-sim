@@ -462,6 +462,18 @@ public struct Colony {
         // 6. Inter-organism interactions: repulsion (no-overlap between
         //    different-organism cells) + predation energy drain.
         var externalForces = [SIMD3<Float>](repeating: .zero, count: cells.count)
+        // Cilia / brownian baseline: every cell gets a random nudge per
+        // tick so the tank is never static. Magnitude is small enough not
+        // to overwhelm bonds or muscle.
+        if ciliaStrength > 0 {
+            for i in 0..<cells.count {
+                externalForces[i] += SIMD3<Float>(
+                    Float(rng.nextGaussian()) * ciliaStrength,
+                    Float(rng.nextGaussian()) * ciliaStrength,
+                    Float(rng.nextGaussian()) * ciliaStrength * 0.3
+                )
+            }
+        }
         if cells.count > 1 {
             // Rebuild index using up-to-date positions (births/deaths happened).
             let positions = cells.map { $0.position }
@@ -572,6 +584,11 @@ public struct Colony {
     public var predationRate: Float = 1.6
     public var predationEfficiency: Float = 0.7
     public var predationPush: Float = 1.2
+    /// Continuous cilia / brownian jitter per cell. Real cells are never
+    /// motionless in a fluid medium — there's always thermal + cilia
+    /// motion. This is physics, not behaviour: the same baseline applies
+    /// to every cell regardless of genome.
+    public var ciliaStrength: Float = 0.45
 
     // MARK: - Helpers
 
