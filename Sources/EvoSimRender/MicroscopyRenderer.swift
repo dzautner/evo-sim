@@ -12,9 +12,25 @@ import EvoSimCore
 /// Pure 2D z-sorted painter, no SDF, no bin artifacts ever. Background is
 /// a pale watery wash with gentle fBm noise. Cells are translucent so
 /// stacked cells in 3D show through.
+/// Mutable camera state shared across frame renders so a GIF / live app
+/// can smoothly interpolate viewport changes (no jumpy zoom).
+public final class MicroscopeCamera {
+    public var minX: Float = 0
+    public var minY: Float = 0
+    public var extent: Float = 0
+    public var initialized: Bool = false
+    /// Smoothing factor per render call. 0 = no smoothing (snap to target);
+    /// 1 = never move. 0.85 ≈ takes ~6 frames to converge.
+    public var smoothing: Float = 0.85
+    public init() {}
+}
+
 public struct MicroscopyRenderer {
     public var width: Int
     public var height: Int
+    /// Optional persistent camera — pass the SAME instance across frames
+    /// to get smooth tracking. nil = fresh viewport per render.
+    public var camera: MicroscopeCamera? = nil
     /// Cell visual radius in world units. Larger ⇒ cells fill more of the
     /// frame and you can see their nucleus.
     public var cellRadius: Float = 2.4
@@ -71,16 +87,35 @@ public struct MicroscopyRenderer {
                     maxP.y = max(maxP.y, c.position.y)
                 }
                 // Pad + enforce minimum extent + square aspect.
-                var extentX = (maxP.x - minP.x) + followPadding * 2
-                var extentY = (maxP.y - minP.y) + followPadding * 2
-                let side = max(minFrameExtent, max(extentX, extentY))
-                extentX = side; extentY = side
+                let extentXraw = (maxP.x - minP.x) + followPadding * 2
+                let extentYraw = (maxP.y - minP.y) + followPadding * 2
+                let side = max(minFrameExtent, max(extentXraw, extentYraw))
                 let cx = (minP.x + maxP.x) * 0.5
                 let cy = (minP.y + maxP.y) * 0.5
-                viewMinX = cx - extentX * 0.5
-                viewMinY = cy - extentY * 0.5
-                viewExtentX = extentX
-                viewExtentY = extentY
+                var targetMinX = cx - side * 0.5
+                var targetMinY = cy - side * 0.5
+                var targetExtent = side
+
+                if let cam = camera {
+                    if !cam.initialized {
+                        cam.minX = targetMinX
+                        cam.minY = targetMinY
+                        cam.extent = targetExtent
+                        cam.initialized = true
+                    } else {
+                        let s = max(0, min(0.99, cam.smoothing))
+                        cam.minX = cam.minX * s + targetMinX * (1 - s)
+                        cam.minY = cam.minY * s + targetMinY * (1 - s)
+                        cam.extent = cam.extent * s + targetExtent * (1 - s)
+                    }
+                    targetMinX = cam.minX
+                    targetMinY = cam.minY
+                    targetExtent = cam.extent
+                }
+                viewMinX = targetMinX
+                viewMinY = targetMinY
+                viewExtentX = targetExtent
+                viewExtentY = targetExtent
             }
         }
         let pxPerUnitX = Float(w) / viewExtentX

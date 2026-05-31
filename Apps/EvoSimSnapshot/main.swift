@@ -108,6 +108,8 @@ let gifMetaballRenderer = SnapshotRenderer(width: cli.width, height: cli.height)
 let gifRaymarchRenderer = RaymarchRenderer(width: cli.width, height: cli.height)
 var gifMicroscopyRenderer = MicroscopyRenderer(width: cli.width, height: cli.height)
 gifMicroscopyRenderer.followLargestOrganism = cli.followLargest
+let gifCamera = MicroscopeCamera()
+gifMicroscopyRenderer.camera = gifCamera
 
 let t0 = Date()
 // Drifting current state — periodically shifts so the tank doesn't stagnate.
