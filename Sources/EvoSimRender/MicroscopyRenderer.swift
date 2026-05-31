@@ -329,6 +329,19 @@ public struct MicroscopyRenderer {
             _ = r2World
         }
 
+        // ---------------- Predation events ----------------
+        // Dark angular streaks where a predator drained a prey this tick.
+        // Reads as a small "bite" mark with the wound darkening at the
+        // predator's mouth-end.
+        for ev in world.colony.recentPredations {
+            let ageT = Float(ev.age) / Float(max(1, world.colony.predationEventLifetime))
+            let alpha = max(0, 0.7 * (1 - ageT))
+            let pax = wx2px(ev.predator.x), pay = wy2py(ev.predator.y)
+            let pbx = wx2px(ev.prey.x), pby = wy2py(ev.prey.y)
+            drawDarkStreak(into: &pixels, w: w, h: h,
+                           x0: pax, y0: pay, x1: pbx, y1: pby, alpha: alpha)
+        }
+
         // ---------------- Global film-grain + slight blur ----------------
         // Heavy luminance grain over the entire image (film not pixels).
         for py in 0..<h {
@@ -420,6 +433,29 @@ public struct MicroscopyRenderer {
         let ab = a + (b - a) * sx
         let cd = c + (d - c) * sx
         return ab + (cd - ab) * sy
+    }
+
+    private func drawDarkStreak(
+        into pixels: inout [UInt8], w: Int, h: Int,
+        x0: Float, y0: Float, x1: Float, y1: Float, alpha: Float
+    ) {
+        let dx = x1 - x0, dy = y1 - y0
+        let len = sqrt(dx * dx + dy * dy)
+        if len < 1 { return }
+        let steps = Int(len.rounded(.up))
+        for s in 0...steps {
+            let t = Float(s) / Float(max(1, steps))
+            // Predator end darker, prey end paler.
+            let a: Float = alpha * (0.4 + 0.6 * (1 - t))
+            let x = x0 + dx * t, y = y0 + dy * t
+            let xi = Int(x.rounded()), yi = Int(y.rounded())
+            if xi < 0 || xi >= w || yi < 0 || yi >= h { continue }
+            let idx = 4 * (xi + yi * w)
+            // Darken the pixel toward near-black.
+            pixels[idx + 0] = toByte(Float(pixels[idx + 0]) / 255 * (1 - a) + 0.05 * a)
+            pixels[idx + 1] = toByte(Float(pixels[idx + 1]) / 255 * (1 - a) + 0.05 * a)
+            pixels[idx + 2] = toByte(Float(pixels[idx + 2]) / 255 * (1 - a) + 0.05 * a)
+        }
     }
 
     static func fbm(_ x: Float, _ y: Float, _ seed: UInt32, octaves: Int = 3) -> Float {
