@@ -13,27 +13,13 @@ final class Simulation: ObservableObject {
     private var timer: Timer?
     private var lastHostTime: CFTimeInterval = 0
     private var accumulator: Double = 0
-    private let maxStepsPerPump = 64
+    private var ticksSinceLastSprinkle: Int = 0
+    private let maxStepsPerPump = 128
 
-    init() {
-        var w = World(seed: 0xC0FFEE)
-        // Bootstrap food + one seed cell so the empty tank isn't literally empty
-        // during dev. The NCA in Phase 2 will spawn cells via division instead.
-        let extent = SIMD3<Float>(
-            Float(w.chemistry.nx) * w.chemistry.cellSize,
-            Float(w.chemistry.ny) * w.chemistry.cellSize,
-            Float(w.chemistry.nz) * w.chemistry.cellSize
-        )
-        let center = extent * 0.5
-        for _ in 0..<8 {
-            let p = SIMD3<Float>(
-                Float(w.rng.nextUnit()) * extent.x,
-                Float(w.rng.nextUnit()) * extent.y,
-                Float(w.rng.nextUnit()) * extent.z
-            )
-            w.chemistry.deposit(at: p, amount: 50, sigma: 3.0)
-        }
-        _ = w.colony.spawn(at: center, lineageId: 1)
+    init(initialOrganisms: Int = 24, seed: UInt64 = 0xC0FFEE) {
+        var w = World(seed: seed)
+        w.seedRandomOrganisms(count: initialOrganisms)
+        w.sprinkleFood(count: 10, amount: 220, sigma: 4.5)
         self.world = w
     }
 
@@ -59,7 +45,14 @@ final class Simulation: ObservableObject {
         let fx = Float(p.x / size.width) * extent.x
         let fy = Float(p.y / size.height) * extent.y
         let fz = extent.z * 0.5
-        world.chemistry.deposit(at: SIMD3<Float>(fx, fy, fz), amount: 80, sigma: 3.5)
+        world.chemistry.deposit(at: SIMD3<Float>(fx, fy, fz), amount: 90, sigma: 3.5)
+    }
+
+    func reseed(organisms n: Int = 24) {
+        var w = World(seed: UInt64.random(in: 1...UInt64.max))
+        w.seedRandomOrganisms(count: n)
+        w.sprinkleFood(count: 10, amount: 220, sigma: 4.5)
+        world = w
     }
 
     private func pump() {
@@ -71,6 +64,11 @@ final class Simulation: ObservableObject {
         accumulator += realDt * speedMultiplier
         var stepped = 0
         while accumulator >= world.fixedDt && stepped < maxStepsPerPump {
+            ticksSinceLastSprinkle += 1
+            if ticksSinceLastSprinkle >= 240 {
+                world.sprinkleFood(count: 4)
+                ticksSinceLastSprinkle = 0
+            }
             world.tick()
             accumulator -= world.fixedDt
             stepped += 1

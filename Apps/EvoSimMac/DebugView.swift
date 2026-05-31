@@ -59,6 +59,7 @@ struct DebugView: View {
             Text("step  \(sim.world.step)")
             Text(String(format: "t     %.2f s", sim.world.time))
             Text(String(format: "speed %.0fx", sim.speedMultiplier))
+            Text("orgs  \(sim.world.colony.organismCount)")
             Text("cells \(sim.world.colony.count)")
             Text(String(format: "energy %.2f", sim.world.totalEnergy))
         }
@@ -67,7 +68,7 @@ struct DebugView: View {
     }
 
     private var hint: some View {
-        Text("click to drop food · Phase 1 of 6")
+        Text("click to drop food · Phase 2 of 6")
             .font(.system(size: 10, design: .monospaced))
             .foregroundStyle(.white.opacity(0.35))
     }

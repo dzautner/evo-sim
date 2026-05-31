@@ -115,7 +115,10 @@ sharply separate:
 
 - **Laws of nature (given):** chemistry diffusion + decay, mass
   conservation, soft-body spring physics, membrane uptake of nutrient from
-  the local grid cell, gravity / currents / boundary conditions.
+  the local grid cell, gravity / currents / boundary conditions. The cell's
+  **energy reservoir (state channel 0)** is physics — modified only by
+  uptake, metabolic cost, and division share. The NCA's Δstate output for
+  channel 0 is discarded so evolution can't conjure energy from nothing.
 - **Evolved (genome-driven):** when to divide, when to die, where to push
   daughter cell, what to differentiate into, what to secrete, spring
   stiffness / rest length per bond, motor contraction signals, any sensor
