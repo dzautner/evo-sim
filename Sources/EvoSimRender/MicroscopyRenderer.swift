@@ -69,16 +69,54 @@ public struct MicroscopyRenderer {
         }
 
         // -----------------------------------------------------------------
+        // Cytoplasmic bridges between bonded cells — drawn first so cells
+        // render on top of them. Each bond becomes a thin tapered link in
+        // the slide background tone of a membrane.
+        // -----------------------------------------------------------------
+        var posById = [UInt32: SIMD2<Float>]()
+        posById.reserveCapacity(world.colony.cells.count)
+        for c in world.colony.cells {
+            posById[c.id] = SIMD2<Float>(c.position.x * pxPerUnitX, c.position.y * pxPerUnitY)
+        }
+        for bond in world.colony.bonds {
+            guard let pa = posById[bond.a], let pb = posById[bond.b] else { continue }
+            drawCytoBridge(into: &pixels, w: w, h: h, a: pa, b: pb,
+                           color: SIMD3<Float>(0.36, 0.42, 0.46),
+                           halfWidth: 1.6)
+        }
+
+        // -----------------------------------------------------------------
         // Z-sort cells back-to-front for proper depth painting.
         // -----------------------------------------------------------------
         var sorted = world.colony.cells
         sorted.sort { $0.position.z < $1.position.z }
 
-        let rPx = cellRadius * pxPerUnitX  // assume square aspect
-        let membranePx = rPx * membraneFrac
-        let nucleusPx = rPx * nucleusFrac
+        let baseRPx = cellRadius * pxPerUnitX  // assume square aspect
+
+        // Build cell index → role signals so cytoplasm tone can shift
+        // subtly by NCA output (predator = warmer, motor = neutral,
+        // structural = cooler).
+        var roleP = [UInt32: Float]()
+        var roleC = [UInt32: Float]()
+        for (i, c) in world.colony.cells.enumerated() {
+            roleP[c.id] = world.colony.predation.indices.contains(i) ? max(0, world.colony.predation[i]) : 0
+            roleC[c.id] = world.colony.contraction.indices.contains(i) ? max(0, world.colony.contraction[i]) : 0
+        }
 
         for cell in sorted {
+            // Per-cell visual seed for stable membrane shape / nucleus offset.
+            let seedCore = UInt32(cell.id)
+            // Cell size varies with cumulative energy + a small per-cell
+            // genetic factor.
+            let energyHeat = 1.0 - expf(-cell.energy * 0.4)
+            let sizeJitter = 0.85 + Self.hash01(seedCore, 11, 0) * 0.4
+            let rPx = baseRPx * sizeJitter * (0.85 + 0.25 * energyHeat)
+            let membranePx = rPx * membraneFrac
+            let nucleusPx = rPx * nucleusFrac
+            // Second internal structure (vacuole/organelle): smaller, dimmer,
+            // farther offset than nucleus.
+            let vacRadiusPx = rPx * 0.16
+            let vacOffMag = rPx * 0.45
             let cxF = cell.position.x * pxPerUnitX
             let cyF = cell.position.y * pxPerUnitY
             // Depth: front cells slightly larger + brighter. zNorm 0 = back.
@@ -90,20 +128,37 @@ public struct MicroscopyRenderer {
 
             // Per-cell variation: each cell gets a deterministic seed so its
             // membrane noise + nucleus offset are stable frame-to-frame.
-            let seedA = UInt32(cell.id &* 374761)
-            let seedB = UInt32(cell.id &* 668265)
+            let seedA = UInt32(truncatingIfNeeded: Int(cell.id) &* 374761)
+            let seedB = UInt32(truncatingIfNeeded: Int(cell.id) &* 668265)
+            let seedC = UInt32(truncatingIfNeeded: Int(cell.id) &* 2147483)
+            let seedD = UInt32(truncatingIfNeeded: Int(cell.id) &* 9176881)
             let nucleusOffX = (Self.hash01(seedA, 1, 0) - 0.5) * r * 0.35
             let nucleusOffY = (Self.hash01(seedB, 2, 0) - 0.5) * r * 0.35
             let nucleusCx = cxF + nucleusOffX
             let nucleusCy = cyF + nucleusOffY
+            // Vacuole offset — opposite side of nucleus, jittered.
+            let vacAngle = Self.hash01(seedC, 3, 0) * 6.2831
+            let vacCx = cxF + cos(vacAngle) * vacOffMag * depthScale
+            let vacCy = cyF + sin(vacAngle) * vacOffMag * depthScale
 
-            // Cytoplasm tone — slight cool/warm by cell.energy.
-            let energyHeat = 1.0 - expf(-cell.energy * 0.4)
-            let cytoCool = SIMD3<Float>(0.45, 0.52, 0.60)
-            let cytoWarm = SIMD3<Float>(0.62, 0.55, 0.45)
-            let cytoBase = (cytoCool + (cytoWarm - cytoCool) * energyHeat) * depthBright
-            let membraneCol = SIMD3<Float>(0.08, 0.10, 0.13) * depthBright
+            // Cytoplasm tone — base cool/warm shifts by role signals.
+            let pSig = roleP[cell.id] ?? 0
+            let mSig = roleC[cell.id] ?? 0
+            let cytoStruct = SIMD3<Float>(0.42, 0.50, 0.58)   // structural: cool
+            let cytoMotor = SIMD3<Float>(0.55, 0.51, 0.45)    // motor: neutral
+            let cytoPred = SIMD3<Float>(0.60, 0.42, 0.40)     // predator: warm/reddish
+            var cytoBase: SIMD3<Float>
+            if pSig > 0.25 {
+                cytoBase = mix(cytoStruct, cytoPred, t: min(1, pSig * 1.8))
+            } else if mSig > 0.25 {
+                cytoBase = mix(cytoStruct, cytoMotor, t: min(1, mSig * 1.8))
+            } else {
+                cytoBase = cytoStruct
+            }
+            cytoBase = cytoBase * depthBright * (0.9 + 0.2 * energyHeat)
+            let membraneCol = SIMD3<Float>(0.07, 0.08, 0.11) * depthBright
             let nucleusCol = SIMD3<Float>(0.93, 0.86, 0.74) * depthBright
+            let vacuoleCol = SIMD3<Float>(0.25, 0.28, 0.32) * depthBright
 
             // Bounding box.
             let pad = Int(r.rounded(.up)) + 2
@@ -120,24 +175,36 @@ public struct MicroscopyRenderer {
                     let dx = Float(px) - cxF
                     let dy = Float(py) - cyF
                     let d2 = dx * dx + dy * dy
-                    if d2 > r2 { continue }
+                    if d2 > r2 * 1.15 { continue }  // pre-cull
                     let d = d2.squareRoot()
+
+                    // Per-pixel membrane-radius modulation: sample angular
+                    // fBm so the cell outline isn't a perfect circle. Real
+                    // cells aren't perfectly round.
+                    let theta = atan2f(dy, dx)
+                    let lobe = Self.valueNoise(theta * 1.3 + 7.0, theta * 0.7, seedD) - 0.5
+                    let lobe2 = Self.valueNoise(theta * 2.7, theta * 1.5 + 3.1, seedC) - 0.5
+                    let radiusMod = r * (1.0 + (lobe * 0.10 + lobe2 * 0.06))
+                    if d > radiusMod { continue }
 
                     // Distance to nucleus.
                     let ndx = Float(px) - nucleusCx
                     let ndy = Float(py) - nucleusCy
                     let nd2 = ndx * ndx + ndy * ndy
                     let nd = nd2.squareRoot()
+                    let vdx = Float(px) - vacCx
+                    let vdy = Float(py) - vacCy
+                    let vd2 = vdx * vdx + vdy * vdy
+                    let vd = vd2.squareRoot()
 
-                    // Per-pixel sample colour.
                     var col: SIMD3<Float>
-                    var alpha: Float = 0.78  // cells are slightly translucent
+                    var alpha: Float = 0.82
 
                     // Cytoplasm fBm (in world units so it follows the cell).
                     let wx = (Float(px) / pxPerUnitX) / cytoNoiseScale
                     let wy = (Float(py) / pxPerUnitY) / cytoNoiseScale
                     let cytoN = Self.fbm(wx, wy, cytoSeed, octaves: 3)
-                    let cytoLit = cytoBase * (0.85 + cytoN * 0.4)
+                    let cytoLit = cytoBase * (0.82 + cytoN * 0.45)
 
                     if nd < nucleusPx * depthScale {
                         // Inside nucleus — bright with a soft falloff to the
@@ -145,16 +212,20 @@ public struct MicroscopyRenderer {
                         let nt = max(0, 1 - nd / (nucleusPx * depthScale))
                         let nGlow = pow(nt, 0.7)
                         col = cytoLit + (nucleusCol - cytoLit) * nGlow
+                        alpha = 0.92
+                    } else if vd < vacRadiusPx * depthScale {
+                        // Vacuole — dark soft circle (less prominent than
+                        // nucleus). Reads as a second organelle.
+                        let vt = max(0, 1 - vd / (vacRadiusPx * depthScale))
+                        let vMix = pow(vt, 0.6) * 0.75
+                        col = cytoLit + (vacuoleCol - cytoLit) * vMix
                         alpha = 0.88
-                    } else if d > r - membranePx {
-                        // Membrane ring — dark with a 1-pixel soft edge so it
-                        // doesn't look jagged.
-                        let edgeT = max(0, (d - (r - membranePx)) / membranePx)
+                    } else if d > radiusMod - membranePx {
+                        // Membrane ring — dark with a soft edge.
+                        let edgeT = max(0, (d - (radiusMod - membranePx)) / membranePx)
                         let mGlow = 1 - pow(edgeT, 0.6) * 0.4
                         col = membraneCol * mGlow
-                        // Outer membrane fades slightly so cells have a soft
-                        // edge against the background.
-                        let outerFade = max(0, (d - (r * 0.92)) / (r * 0.08))
+                        let outerFade = max(0, (d - (radiusMod * 0.92)) / (radiusMod * 0.08))
                         alpha = 0.95 * (1 - outerFade * 0.45)
                     } else {
                         col = cytoLit
@@ -207,6 +278,49 @@ public struct MicroscopyRenderer {
     @inline(__always)
     private func toByte(_ v: Float) -> UInt8 {
         UInt8(min(255, max(0, v * 255)))
+    }
+
+    @inline(__always)
+    private func mix(_ a: SIMD3<Float>, _ b: SIMD3<Float>, t: Float) -> SIMD3<Float> {
+        a + (b - a) * t
+    }
+
+    private func drawCytoBridge(
+        into pixels: inout [UInt8], w: Int, h: Int,
+        a: SIMD2<Float>, b: SIMD2<Float>,
+        color: SIMD3<Float>, halfWidth: Float
+    ) {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let len = sqrt(dx * dx + dy * dy)
+        if len < 1 { return }
+        let nx = -dy / len  // normal
+        let ny = dx / len
+        let steps = Int(len.rounded(.up))
+        for s in 0..<steps {
+            let t = Float(s) / Float(max(1, steps - 1))
+            let cx = a.x + dx * t
+            let cy = a.y + dy * t
+            // Bridge tapers at the ends.
+            let taper = sin(t * .pi)
+            let hw = halfWidth * taper
+            let hwI = Int(hw.rounded(.up))
+            for off in -hwI...hwI {
+                let f = Float(off) / max(0.01, hw)
+                let alpha: Float = max(0, (1 - f * f)) * 0.65
+                let pxF = cx + nx * Float(off)
+                let pyF = cy + ny * Float(off)
+                let xi = Int(pxF.rounded()), yi = Int(pyF.rounded())
+                if xi < 0 || xi >= w || yi < 0 || yi >= h { continue }
+                let idx = 4 * (xi + yi * w)
+                let bgR = Float(pixels[idx + 0]) / 255
+                let bgG = Float(pixels[idx + 1]) / 255
+                let bgB = Float(pixels[idx + 2]) / 255
+                pixels[idx + 0] = toByte(bgR * (1 - alpha) + color.x * alpha)
+                pixels[idx + 1] = toByte(bgG * (1 - alpha) + color.y * alpha)
+                pixels[idx + 2] = toByte(bgB * (1 - alpha) + color.z * alpha)
+            }
+        }
     }
 
     @inline(__always)
