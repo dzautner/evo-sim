@@ -13,6 +13,10 @@ public struct Organism {
     public var totalDisplacement: Float = 0
     /// Previous centre of mass; nil until first tick computes it.
     public var lastCOM: SIMD3<Float>? = nil
+    /// Cumulative energy this organism has drained from cells of other
+    /// organisms (predation success). Selection can reward this so
+    /// successful hunters are picked over passive feeders.
+    public var totalDrained: Float = 0
 
     public init(id: UInt32, genome: Genome) {
         self.id = id
@@ -127,6 +131,7 @@ public struct Colony {
         keepFraction: Float = 0.4,
         motionBias: Float = 0.0,
         chemotaxisBias: Float = 0.0,
+        predationBias: Float = 0.0,
         chemistry: NutrientField? = nil
     ) {
         guard organismCount > 4 else { return }
@@ -174,7 +179,10 @@ public struct Colony {
                 let local = cf.sample(at: g.i, g.j, g.k)
                 chemo = local * chemotaxisBias * Float(s.cellCount)
             }
-            return (s.oid, survivalFitness + motion + chemo)
+            // Predation success: cumulative energy drained from other orgs.
+            let drained = organisms[s.oid]?.totalDrained ?? 0
+            let predationFit = drained * predationBias
+            return (s.oid, survivalFitness + motion + chemo + predationFit)
         }.sorted { $0.1 > $1.1 }
 
         let keep = max(2, Int(Float(scored.count) * keepFraction))
@@ -583,6 +591,11 @@ public struct Colony {
                         cells[nj].energy -= taken
                         cells[i].energy  += taken * predationEfficiency
                         externalForces[nj] += dir * predationPush * aI
+                        if let oid = organisms[cells[i].organismId] {
+                            var o = oid
+                            o.totalDrained += taken * predationEfficiency
+                            organisms[cells[i].organismId] = o
+                        }
                         if taken > 0.005 {
                             recentPredations.append(PredationEvent(
                                 predator: cells[i].position,
@@ -597,6 +610,11 @@ public struct Colony {
                         cells[i].energy  -= taken
                         cells[nj].energy += taken * predationEfficiency
                         externalForces[i] -= dir * predationPush * aNJ
+                        if let oid = organisms[cells[nj].organismId] {
+                            var o = oid
+                            o.totalDrained += taken * predationEfficiency
+                            organisms[cells[nj].organismId] = o
+                        }
                         if taken > 0.005 {
                             recentPredations.append(PredationEvent(
                                 predator: cells[nj].position,
