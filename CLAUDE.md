@@ -67,12 +67,17 @@ Each phase is independently shippable and visually verifiable.
 
 - **Phase 0 — Scaffolding.** Swift Package layout, macOS app shell, debug
   2D top-down view (SwiftUI Canvas, no Metal yet), fixed-timestep sim loop.
-- **Phase 1 — Chemistry + single cells.** Nutrient field with diffusion. One
-  cell that uptakes, grows, divides on a hard-coded rule. Verify mass
-  conservation, stable diffusion.
-- **Phase 2 — Morphogenesis.** Replace hard-coded division with NCA genome.
-  Cells form stable multicellular blobs. Mutation + asexual reproduction.
-  Verify: two different random genomes grow visibly different bodies.
+- **Phase 1 — Chemistry + passive cell.** Nutrient field with diffusion +
+  decay. Cell uptakes from local grid (membrane physics, not behavior). No
+  division, no movement, no death — those wait for the NCA. Verify mass
+  conservation (chemistry + cell energy) and stable diffusion. Snapshot CLI
+  + PNG renderer for screenshots and CI.
+- **Phase 2 — Morphogenesis (NCA genome).** Introduce per-organism NCA
+  network. NCA reads (own state, mean neighbor state, local chemistry,
+  mechanical stress); outputs decide division / death / state update /
+  spring stiffness / contraction / secretion. Mutation + asexual
+  reproduction. Verify: two different random genomes grow visibly different
+  bodies in the same chemistry environment.
 - **Phase 3 — Soft-body physics.** Spring mesh between cells, semi-implicit
   Euler. Genome controls spring stiffness. Verify: bodies deform under
   gravity / currents, don't explode.
@@ -101,6 +106,24 @@ Do not start a phase until the prior phase has a green visual verification.
 - **Visual verification is the test.** For sim behavior, prefer a recorded
   short visual clip + assertion on summary stats over unit tests on
   intermediate state. Cell-level state is not API.
+
+## The "law of nature" vs "evolved trait" boundary
+
+Some things are physics — present in every cell, never up for evolution to
+discover. Others are morphology / behavior — the genome decides. Keep them
+sharply separate:
+
+- **Laws of nature (given):** chemistry diffusion + decay, mass
+  conservation, soft-body spring physics, membrane uptake of nutrient from
+  the local grid cell, gravity / currents / boundary conditions.
+- **Evolved (genome-driven):** when to divide, when to die, where to push
+  daughter cell, what to differentiate into, what to secrete, spring
+  stiffness / rest length per bond, motor contraction signals, any sensor
+  weighting. Nothing in this list may be hardcoded — even as a placeholder.
+
+If a feature is on the "evolved" side, it lands in the codebase ONLY
+through the NCA's outputs. No `if energy > X { divide() }` shortcuts, even
+"just to test."
 
 ## Anti-patterns (will be rejected on sight)
 
