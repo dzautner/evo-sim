@@ -27,6 +27,8 @@ struct CLI {
     var keepFraction: Float = 0.4
     var motionBias: Float = 0.0  // selection: how much to weight displacement
     var grid: Int = 0            // 0 = single image; >0 = N×N grid time-lapse
+    var gifFrames: Int = 0       // 0 = off; >0 = capture this many GIF frames
+    var gifDelay: Double = 0.06  // seconds between frames (1/15s default)
     var out: String = "snapshot.png"
 
     static func parse(_ args: [String]) -> CLI {
@@ -49,6 +51,8 @@ struct CLI {
             case "--keep":        if let v = nextVal(), let n = Float(v) { c.keepFraction = max(0.1, min(0.95, n)); i += 1 }
             case "--motion-bias": if let v = nextVal(), let n = Float(v) { c.motionBias = max(0, n); i += 1 }
             case "--grid":        if let v = nextVal(), let n = Int(v) { c.grid = max(0, n); i += 1 }
+            case "--gif":         if let v = nextVal(), let n = Int(v) { c.gifFrames = max(0, n); i += 1 }
+            case "--gif-delay":   if let v = nextVal(), let n = Double(v) { c.gifDelay = max(0.01, n); i += 1 }
             case "--out":         if let v = nextVal() { c.out = v; i += 1 }
             case "-h", "--help":
                 print("EvoSimSnapshot [--seed N] [--steps N] [--width W] [--height H] [--organisms N] [--food N] [--food-every N] [--trail K] [--trail-every K] [--out path.png]")
@@ -85,6 +89,15 @@ var nextGridCapture = gridFrameInterval - 1
 let gridFrameSize = max(180, min(cli.width, cli.height) / max(1, gridN))
 let frameRenderer = SnapshotRenderer(width: gridFrameSize, height: gridFrameSize)
 
+// GIF capture: if cli.gifFrames > 0, capture that many frames evenly through
+// the run at the full snapshot resolution and emit a single animated GIF.
+var gifFrames: [[UInt8]] = []
+let gifInterval: Int = cli.gifFrames > 0
+    ? max(1, cli.steps / cli.gifFrames)
+    : Int.max
+var nextGifCapture = gifInterval - 1
+let gifRenderer = SnapshotRenderer(width: cli.width, height: cli.height)
+
 let t0 = Date()
 for n in 0..<cli.steps {
     if cli.foodEvery > 0 && n > 0 && n % cli.foodEvery == 0 {
@@ -109,6 +122,10 @@ for n in 0..<cli.steps {
         gridFrames.append(frameRenderer.renderRGBA(world))
         nextGridCapture += gridFrameInterval
     }
+    if cli.gifFrames > 0 && n >= nextGifCapture && gifFrames.count < cli.gifFrames {
+        gifFrames.append(gifRenderer.renderRGBA(world))
+        nextGifCapture += gifInterval
+    }
 }
 let wall = Date().timeIntervalSince(t0)
 print(String(format: "[snapshot] %d steps in %.3fs (%.1f steps/s)  organisms=%d  cells=%d  bonds=%d  totalEnergy=%.2f",
@@ -116,7 +133,16 @@ print(String(format: "[snapshot] %d steps in %.3fs (%.1f steps/s)  organisms=%d 
              world.colony.organismCount, world.colony.count, world.colony.bonds.count, world.colony.totalEnergy_orZero))
 
 let outURL = URL(fileURLWithPath: cli.out)
-if gridFrameCount > 0 && gridFrames.count == gridFrameCount {
+if cli.gifFrames > 0 && !gifFrames.isEmpty {
+    if !SnapshotRenderer.writeAnimatedGIF(
+        frames: gifFrames, width: cli.width, height: cli.height,
+        frameDelay: cli.gifDelay, loopCount: 0, to: outURL
+    ) {
+        FileHandle.standardError.write(Data("failed to write \(outURL.path)\n".utf8))
+        exit(1)
+    }
+    print("[snapshot] wrote \(outURL.path) (\(cli.width)×\(cli.height), \(gifFrames.count) frames, \(cli.gifDelay)s/frame)")
+} else if gridFrameCount > 0 && gridFrames.count == gridFrameCount {
     // Tile gridN×gridN frames into one big PNG.
     let tileW = frameRenderer.width
     let tileH = frameRenderer.height

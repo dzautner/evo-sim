@@ -284,6 +284,48 @@ public struct SnapshotRenderer {
         return Self.writeRGBA8PNG(pixels: pixels, width: width, height: height, to: url)
     }
 
+    /// Animated GIF from a sequence of RGBA8 frames. Each frame is a full
+    /// pixel buffer of size `width * height * 4`. `frameDelay` is the delay
+    /// between frames in seconds (GIF granularity is 1/100s, so values get
+    /// rounded). `loopCount` of 0 means infinite loop.
+    @discardableResult
+    public static func writeAnimatedGIF(
+        frames: [[UInt8]], width: Int, height: Int,
+        frameDelay: Double, loopCount: Int = 0, to url: URL
+    ) -> Bool {
+        guard !frames.isEmpty,
+              let dest = CGImageDestinationCreateWithURL(
+                url as CFURL, UTType.gif.identifier as CFString, frames.count, nil
+              ) else { return false }
+        let fileProps: [CFString: Any] = [
+            kCGImagePropertyGIFDictionary: [
+                kCGImagePropertyGIFLoopCount: loopCount
+            ]
+        ]
+        CGImageDestinationSetProperties(dest, fileProps as CFDictionary)
+        let frameProps: [CFString: Any] = [
+            kCGImagePropertyGIFDictionary: [
+                kCGImagePropertyGIFDelayTime: frameDelay,
+                kCGImagePropertyGIFUnclampedDelayTime: frameDelay
+            ]
+        ]
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return false }
+        let info: CGBitmapInfo = [.byteOrder32Big, CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)]
+        for frame in frames {
+            guard let provider = CGDataProvider(data: Data(frame) as CFData),
+                  let img = CGImage(
+                    width: width, height: height,
+                    bitsPerComponent: 8, bitsPerPixel: 32,
+                    bytesPerRow: width * 4,
+                    space: cs, bitmapInfo: info,
+                    provider: provider, decode: nil,
+                    shouldInterpolate: false, intent: .defaultIntent
+                  ) else { return false }
+            CGImageDestinationAddImage(dest, img, frameProps as CFDictionary)
+        }
+        return CGImageDestinationFinalize(dest)
+    }
+
     public static func writeRGBA8PNG(pixels: [UInt8], width: Int, height: Int, to url: URL) -> Bool {
         guard let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return false }
         let bitsPerComponent = 8
