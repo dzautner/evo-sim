@@ -36,7 +36,9 @@ final class Simulation: ObservableObject {
         timer = nil
     }
 
-    func dropFoodAtScreenPoint(_ p: CGPoint, in size: CGSize) {
+    enum HandAction { case food, stir, pluck }
+
+    func handAction(_ action: HandAction, at p: CGPoint, in size: CGSize) {
         let extent = SIMD3<Float>(
             Float(world.chemistry.nx) * world.chemistry.cellSize,
             Float(world.chemistry.ny) * world.chemistry.cellSize,
@@ -44,8 +46,17 @@ final class Simulation: ObservableObject {
         )
         let fx = Float(p.x / size.width) * extent.x
         let fy = Float(p.y / size.height) * extent.y
-        let fz = extent.z * 0.5
-        world.chemistry.deposit(at: SIMD3<Float>(fx, fy, fz), amount: 90, sigma: 3.5)
+        let center = SIMD3<Float>(fx, fy, extent.z * 0.5)
+        switch action {
+        case .food:
+            world.chemistry.deposit(at: center, amount: 120, sigma: 3.5)
+        case .stir:
+            // Push nearby cells radially outward. Pure physics — like
+            // disturbing a tank of pond water.
+            world.stirAt(center, radius: 8, strength: 18)
+        case .pluck:
+            world.pluckNearest(center, radius: 4)
+        }
     }
 
     func reseed(organisms n: Int = 24) {

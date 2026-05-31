@@ -48,15 +48,16 @@ public enum NCAInput {
 public enum NCAOutput {
     /// Layout (all indices are AFTER the `stateCh` Δstate block):
     ///   divide (1) | bud (1) | die (1) | divDir (3) |
-    ///   bondStiffness (1) | contraction (1)
-    public static let divideIdx       = 0
-    public static let budIdx          = 1
-    public static let dieIdx          = 2
-    public static let divDirIdx       = 3   // 3 components
+    ///   bondStiffness (1) | contraction (1) | predation (1)
+    public static let divideIdx        = 0
+    public static let budIdx           = 1
+    public static let dieIdx           = 2
+    public static let divDirIdx        = 3   // 3 components
     public static let bondStiffnessIdx = 6
     public static let contractionIdx   = 7
+    public static let predationIdx     = 8
 
-    public static let nonStateChannels = 8
+    public static let nonStateChannels = 9
 
     public static func size(stateChannels: Int) -> Int {
         stateChannels + nonStateChannels

@@ -73,6 +73,38 @@ public struct World {
         }
     }
 
+    /// Hand action: stir cells within `radius` of `at`, applying a radial
+    /// outward impulse. Pure physics — equivalent to dragging a finger
+    /// through a tank of water.
+    public mutating func stirAt(_ at: SIMD3<Float>, radius: Float, strength: Float) {
+        for i in 0..<colony.cells.count {
+            let dp = colony.cells[i].position - at
+            let d = simd_length(dp)
+            if d < radius && d > 1e-3 {
+                let dir = dp / d
+                let falloff = max(0, 1 - d / radius)
+                colony.applyImpulse(at: i, impulse: dir * strength * falloff)
+            }
+        }
+    }
+
+    /// Hand action: pluck the cell nearest `at` (within `radius`) — kills it
+    /// and any bonds it's part of are cleaned up next tick.
+    @discardableResult
+    public mutating func pluckNearest(_ at: SIMD3<Float>, radius: Float) -> Bool {
+        var bestIdx = -1
+        var bestD2: Float = .greatestFiniteMagnitude
+        for (i, c) in colony.cells.enumerated() {
+            let d2 = simd_distance_squared(c.position, at)
+            if d2 < bestD2 { bestD2 = d2; bestIdx = i }
+        }
+        if bestIdx >= 0, bestD2 <= radius * radius {
+            colony.killCell(atIndex: bestIdx)
+            return true
+        }
+        return false
+    }
+
     /// Deposit `n` Gaussian food blobs at random positions. Call periodically
     /// from the snapshot CLI / app to keep the tank fed.
     public mutating func sprinkleFood(count n: Int, amount: Float = 220, sigma: Float = 4.5) {

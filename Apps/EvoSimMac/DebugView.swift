@@ -48,8 +48,18 @@ struct DebugView: View {
                 }
             }
             .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .modifiers(.shift)
+                    .onEnded { v in sim.handAction(.stir, at: v.location, in: geo.size) }
+            )
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .modifiers(.command)
+                    .onEnded { v in sim.handAction(.pluck, at: v.location, in: geo.size) }
+            )
             .onTapGesture(coordinateSpace: .local) { p in
-                sim.dropFoodAtScreenPoint(p, in: geo.size)
+                sim.handAction(.food, at: p, in: geo.size)
             }
         }
     }
@@ -68,7 +78,7 @@ struct DebugView: View {
     }
 
     private var hint: some View {
-        Text("click to drop food · Phase 2 of 6")
+        Text("click = food   ⇧click = stir   ⌘click = pluck   ·   Phase 5 of 6")
             .font(.system(size: 10, design: .monospaced))
             .foregroundStyle(.white.opacity(0.35))
     }

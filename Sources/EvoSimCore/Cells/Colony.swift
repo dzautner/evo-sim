@@ -34,6 +34,11 @@ public struct Colony {
     /// contraction. The NCA chooses how / when to contract — locomotion has
     /// to be discovered.
     public private(set) var contraction: [Float] = []
+    /// Parallel to `cells`: predation signal from last NCA forward pass.
+    /// When positive and a different-organism cell is within attack range,
+    /// the predator drains energy on contact. Cell becomes a "mouth" only
+    /// if its lineage discovers that this output is useful.
+    public private(set) var predation: [Float] = []
     public private(set) var nextCellId: UInt32 = 1
     public private(set) var nextOrganismId: UInt32 = 1
 
@@ -74,6 +79,19 @@ public struct Colony {
     @inlinable public var count: Int { cells.count }
     @inlinable public var organismCount: Int { organisms.count }
 
+    /// Hand-action helper: nudge a cell's velocity directly.
+    public mutating func applyImpulse(at i: Int, impulse: SIMD3<Float>) {
+        guard i >= 0, i < velocities.count else { return }
+        velocities[i] += impulse
+    }
+
+    /// Hand-action helper: mark a cell to die at the next tick by zeroing
+    /// its energy. Bonds clean up automatically in the death pass.
+    public mutating func killCell(atIndex i: Int) {
+        guard i >= 0, i < cells.count else { return }
+        cells[i].energy = -1  // negative → metabolism check kills it next tick
+    }
+
     public mutating func registerOrganism(genome: Genome) -> UInt32 {
         let oid = nextOrganismId; nextOrganismId &+= 1
         organisms[oid] = Organism(id: oid, genome: genome)
@@ -89,6 +107,7 @@ public struct Colony {
         velocities.append(.zero)
         stress.append(0)
         contraction.append(0)
+        predation.append(0)
         return id
     }
 
@@ -207,10 +226,10 @@ public struct Colony {
             let budSig    = outputBuf[stateCh + NCAOutput.budIdx]
             let dieSig    = outputBuf[stateCh + NCAOutput.dieIdx]
 
-            // 2d. Latch the contraction signal so the integrator can use it
-            //     this same tick. tanh output ⇒ [-1, 1]; negative = relax,
-            //     positive = contract.
+            // 2d. Latch contraction + predation signals so the integrator and
+            //     predation pass can use them this tick. tanh output [-1, 1].
             contraction[ci] = outputBuf[stateCh + NCAOutput.contractionIdx]
+            predation[ci]   = outputBuf[stateCh + NCAOutput.predationIdx]
 
             if dieSig > dieThreshold { deaths.insert(ci); continue }
             if postMetab <= 0 { deaths.insert(ci); continue }
@@ -322,10 +341,13 @@ public struct Colony {
             var keptVel: [SIMD3<Float>] = []
             var keptStress: [Float] = []
             var keptContraction: [Float] = []
-            keptCells.reserveCapacity(cells.count - deaths.count)
-            keptVel.reserveCapacity(cells.count - deaths.count)
-            keptStress.reserveCapacity(cells.count - deaths.count)
-            keptContraction.reserveCapacity(cells.count - deaths.count)
+            var keptPredation: [Float] = []
+            let kept = cells.count - deaths.count
+            keptCells.reserveCapacity(kept)
+            keptVel.reserveCapacity(kept)
+            keptStress.reserveCapacity(kept)
+            keptContraction.reserveCapacity(kept)
+            keptPredation.reserveCapacity(kept)
             var deadIds = Set<UInt32>()
             for i in 0..<cells.count {
                 if deaths.contains(i) {
@@ -335,12 +357,14 @@ public struct Colony {
                     keptVel.append(velocities[i])
                     keptStress.append(stress[i])
                     keptContraction.append(contraction[i])
+                    keptPredation.append(predation[i])
                 }
             }
             cells = keptCells
             velocities = keptVel
             stress = keptStress
             contraction = keptContraction
+            predation = keptPredation
             if !deadIds.isEmpty {
                 bonds.removeAll { deadIds.contains($0.a) || deadIds.contains($0.b) }
             }
@@ -351,8 +375,75 @@ public struct Colony {
             organisms.removeValue(forKey: oid)
         }
 
-        // 6. Soft-body physics. Builds idIndex once so the integrator can
-        //    resolve bond endpoints in O(1).
+        // 6. Inter-organism interactions: repulsion (no-overlap between
+        //    different-organism cells) + predation energy drain.
+        var externalForces = [SIMD3<Float>](repeating: .zero, count: cells.count)
+        if cells.count > 1 {
+            // Rebuild index using up-to-date positions (births/deaths happened).
+            let positions = cells.map { $0.position }
+            index.rebuild(positions: positions)
+
+            let repulsionRadius: Float = cellHardRadius * 2
+            let r2 = repulsionRadius * repulsionRadius
+            let attackRadius: Float = cellHardRadius * 2.4
+            let attack2 = attackRadius * attackRadius
+
+            for i in 0..<cells.count {
+                let ci = cells[i]
+                let pi = ci.position
+                let oid = ci.organismId
+                index.forEachNeighbor(of: pi, radius: max(repulsionRadius, attackRadius)) { nj in
+                    if nj <= i { return }
+                    let cj = cells[nj]
+                    if cj.organismId == oid { return }  // same organism handled by bonds
+                    let dp = cells[nj].position - pi
+                    let d2 = simd_dot(dp, dp)
+                    if d2 > attack2 { return }
+                    let d = d2.squareRoot()
+                    let dir: SIMD3<Float>
+                    if d > 1e-4 {
+                        dir = dp / d
+                    } else {
+                        dir = SIMD3<Float>(
+                            Float(rng.nextGaussian()),
+                            Float(rng.nextGaussian()),
+                            Float(rng.nextGaussian())
+                        )
+                    }
+
+                    // Repulsion: linear spring inside the hard-overlap zone.
+                    if d2 < r2 {
+                        let depth = (repulsionRadius - d)
+                        let f = repulsionStiffness * depth * dir
+                        externalForces[i] -= f
+                        externalForces[nj] += f
+                    }
+
+                    // Predation: closer than attackRadius and at least one
+                    // side is signalling. Drain proportional to attack signal
+                    // × dt; predator gains a fraction (conversion efficiency).
+                    let aI  = max(0, predation[i])
+                    let aNJ = max(0, predation[nj])
+                    if aI > 0.2 && cells[nj].energy > 0 {
+                        let drain = predationRate * aI * dt
+                        let taken = min(drain, cells[nj].energy)
+                        cells[nj].energy -= taken
+                        cells[i].energy  += taken * predationEfficiency
+                        // Slight push so prey is shoved.
+                        externalForces[nj] += dir * predationPush * aI
+                    }
+                    if aNJ > 0.2 && cells[i].energy > 0 {
+                        let drain = predationRate * aNJ * dt
+                        let taken = min(drain, cells[i].energy)
+                        cells[i].energy  -= taken
+                        cells[nj].energy += taken * predationEfficiency
+                        externalForces[i] -= dir * predationPush * aNJ
+                    }
+                }
+            }
+        }
+
+        // 7. Soft-body physics.
         if !cells.isEmpty {
             var positions = cells.map { $0.position }
             var idIndex: [UInt32: Int] = [:]
@@ -365,12 +456,20 @@ public struct Colony {
                 bonds: &bonds,
                 idIndex: idIndex,
                 contraction: contraction,
+                externalForces: externalForces,
                 bounds: bounds,
                 dt: dt
             )
             for i in 0..<cells.count { cells[i].position = positions[i] }
         }
     }
+
+    // MARK: - Inter-organism tunables (physics, not evolved)
+    public var cellHardRadius: Float = 0.6
+    public var repulsionStiffness: Float = 4.0
+    public var predationRate: Float = 1.6
+    public var predationEfficiency: Float = 0.7
+    public var predationPush: Float = 1.2
 
     // MARK: - Helpers
 

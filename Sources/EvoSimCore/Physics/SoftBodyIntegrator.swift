@@ -32,6 +32,7 @@ public struct SoftBodyIntegrator {
         bonds: inout [Bond],
         idIndex: [UInt32: Int],
         contraction: [Float],
+        externalForces: [SIMD3<Float>] = [],
         bounds: SIMD3<Float>,
         dt: Float
     ) {
@@ -83,9 +84,11 @@ public struct SoftBodyIntegrator {
             while i >= 0 { bonds.remove(at: brokenIndices[i]); i -= 1 }
         }
 
-        // 2. Per-cell drag + boundary repulsion + integration.
+        // 2. Per-cell drag + boundary repulsion + external + integration.
+        let hasExtForces = externalForces.count == positions.count
         for i in 0..<positions.count {
             var f = forces[i]
+            if hasExtForces { f += externalForces[i] }
             f -= drag * velocities[i]
 
             // Soft wall repulsion: linear spring from each wall.

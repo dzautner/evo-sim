@@ -20,6 +20,9 @@ public struct SnapshotRenderer {
     public var nutrientGain: Float
     public var cellRadiusPx: Float
     public var drawBonds: Bool = true
+    /// Color cells by hash(organismId). Useful in Phase 5+ ecosystems where
+    /// many lineages compete. Off-by-default = uniform amber/white.
+    public var colorByOrganism: Bool = true
     /// Optional motion trail: oldest → newest frames of (cellId, position).
     /// Rendered behind cells as fading dots so locomotion shows in a still.
     public var trailFrames: [[(UInt32, SIMD3<Float>)]] = []
@@ -178,10 +181,20 @@ public struct SnapshotRenderer {
             let py = cell.position.y * pxPerUnit.y
             let energyHeat = 1.0 - expf(-cell.energy * 0.5)
             let radius = cellRadiusPx + energyHeat * 2.5
+            let core: SIMD3<Float>
+            let glow: SIMD3<Float>
+            if colorByOrganism {
+                let hue = organismHue(cell.organismId)
+                let glowC = hsvToRgb(h: hue, s: 0.85, v: 1.0)
+                let coreC = mix(glowC, SIMD3<Float>(1, 1, 1), t: 0.65)
+                core = coreC
+                glow = glowC
+            } else {
+                core = SIMD3<Float>(1.0, 0.95, 0.85)
+                glow = SIMD3<Float>(1.0, 0.55, 0.25)
+            }
             splat(into: &pixels, w: w, h: h, cx: px, cy: py, radius: radius,
-                  core: SIMD3<Float>(1.0, 0.95, 0.85),
-                  glow: SIMD3<Float>(1.0, 0.55, 0.25),
-                  energy: energyHeat)
+                  core: core, glow: glow, energy: energyHeat)
         }
 
         return pixels
@@ -290,6 +303,30 @@ public struct SnapshotRenderer {
             let x = x0 + dx * t
             let y = y0 + dy * t
             blendPixel(into: &pixels, w: w, h: h, x: x, y: y, color: color, alpha: alpha)
+        }
+    }
+
+    @inline(__always)
+    private func organismHue(_ id: UInt32) -> Float {
+        // Cheap hash → [0, 1) hue.
+        var x = id &* 2654435761
+        x ^= x >> 16
+        return Float(x & 0xFFFFFF) / Float(0x1000000)
+    }
+
+    private func hsvToRgb(h: Float, s: Float, v: Float) -> SIMD3<Float> {
+        let i = floor(h * 6)
+        let f = h * 6 - i
+        let p = v * (1 - s)
+        let q = v * (1 - f * s)
+        let t = v * (1 - (1 - f) * s)
+        switch Int(i.truncatingRemainder(dividingBy: 6)) {
+        case 0: return SIMD3<Float>(v, t, p)
+        case 1: return SIMD3<Float>(q, v, p)
+        case 2: return SIMD3<Float>(p, v, t)
+        case 3: return SIMD3<Float>(p, q, v)
+        case 4: return SIMD3<Float>(t, p, v)
+        default: return SIMD3<Float>(v, p, q)
         }
     }
 
