@@ -33,16 +33,20 @@ public final class TankViewModel: ObservableObject {
     private var currentDirection: SIMD3<Float> = .zero
     private let maxStepsPerPump = 96
     private var timer: Timer?
-    private var renderer: SnapshotRenderer
+    private var renderer: MicroscopyRenderer
+    private let camera = MicroscopeCamera()
 
     public init(seed: UInt64 = UInt64.random(in: 1...UInt64.max),
-                initialOrganisms: Int = 6,
-                renderResolution: Int = 512) {
+                initialOrganisms: Int = 5,
+                renderResolution: Int = 600) {
         var w = World(seed: seed)
         w.seedRandomOrganisms(count: initialOrganisms)
         w.sprinkleFood(count: 14, amount: 220, sigma: 4.5)
         self.world = w
-        self.renderer = SnapshotRenderer(width: renderResolution, height: renderResolution)
+        var r = MicroscopyRenderer(width: renderResolution, height: renderResolution)
+        r.followLargestOrganism = true
+        r.camera = camera
+        self.renderer = r
     }
 
     public func start() {
