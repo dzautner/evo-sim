@@ -7,6 +7,12 @@ public struct Organism {
     public var genome: Genome
     public var workspace: NCA.Workspace
     public var ageTicks: UInt64
+    /// Cumulative distance the centre of mass has moved over the organism's
+    /// lifetime, used by motion-biased fitness so locomotion gets selected
+    /// for in addition to survival.
+    public var totalDisplacement: Float = 0
+    /// Previous centre of mass; nil until first tick computes it.
+    public var lastCOM: SIMD3<Float>? = nil
 
     public init(id: UInt32, genome: Genome) {
         self.id = id
@@ -113,7 +119,7 @@ public struct Colony {
     /// genome itself is untouched; we only choose which genomes get to
     /// continue. The selection criterion (survive + grow) is the same
     /// criterion biology imposes via the environment, just accelerated.
-    public mutating func applySelectionPressure(keepFraction: Float = 0.4) {
+    public mutating func applySelectionPressure(keepFraction: Float = 0.4, motionBias: Float = 0.0) {
         guard organismCount > 4 else { return }
 
         // Aggregate per organism.
@@ -128,8 +134,13 @@ public struct Colony {
         }
         let scored: [(UInt32, Float)] = stats.values.map { s in
             let age = organisms[s.oid]?.ageTicks ?? 1
-            let fitness = Float(s.cellCount) * (s.totalEnergy / Float(s.cellCount)) * sqrt(Float(age) + 1)
-            return (s.oid, fitness)
+            let avgE = s.totalEnergy / Float(s.cellCount)
+            let survivalFitness = Float(s.cellCount) * avgE * sqrt(Float(age) + 1)
+            // Motion fitness: displacement per tick of life. Zero if motionBias=0.
+            let disp = organisms[s.oid]?.totalDisplacement ?? 0
+            let speed = disp / max(1, Float(age))
+            let motion = speed * motionBias * Float(s.cellCount)
+            return (s.oid, survivalFitness + motion)
         }.sorted { $0.1 > $1.1 }
 
         let keep = max(2, Int(Float(scored.count) * keepFraction))
@@ -377,6 +388,26 @@ public struct Colony {
             let oid = registerOrganism(genome: mutated)
             spawn(at: b.position, organismId: oid, initialEnergy: b.inheritedState[0])
             cells[cells.count - 1].state = b.inheritedState
+        }
+
+        // 4a. Per-organism centre of mass — feeds motion-biased fitness.
+        if !cells.isEmpty {
+            var sumPos: [UInt32: SIMD3<Float>] = [:]
+            var countPos: [UInt32: Int] = [:]
+            for c in cells {
+                sumPos[c.organismId, default: .zero] += c.position
+                countPos[c.organismId, default: 0] += 1
+            }
+            for (oid, sum) in sumPos {
+                guard var o = organisms[oid] else { continue }
+                let n = Float(countPos[oid] ?? 1)
+                let com = sum / n
+                if let prev = o.lastCOM {
+                    o.totalDisplacement += simd_length(com - prev)
+                }
+                o.lastCOM = com
+                organisms[oid] = o
+            }
         }
 
         // 5. Age organisms; prune dead cells + their parallel arrays; drop

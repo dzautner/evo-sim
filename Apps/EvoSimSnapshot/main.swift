@@ -25,6 +25,8 @@ struct CLI {
     var trailEvery: Int = 6      // capture every N ticks (so trail covers trailFrames * trailEvery ticks)
     var selectEvery: Int = 0     // 0 = off — tournament-selection cadence
     var keepFraction: Float = 0.4
+    var motionBias: Float = 0.0  // selection: how much to weight displacement
+    var grid: Int = 0            // 0 = single image; >0 = N×N grid time-lapse
     var out: String = "snapshot.png"
 
     static func parse(_ args: [String]) -> CLI {
@@ -45,6 +47,8 @@ struct CLI {
             case "--trail-every": if let v = nextVal(), let n = Int(v) { c.trailEvery = max(1, n); i += 1 }
             case "--select-every": if let v = nextVal(), let n = Int(v) { c.selectEvery = max(0, n); i += 1 }
             case "--keep":        if let v = nextVal(), let n = Float(v) { c.keepFraction = max(0.1, min(0.95, n)); i += 1 }
+            case "--motion-bias": if let v = nextVal(), let n = Float(v) { c.motionBias = max(0, n); i += 1 }
+            case "--grid":        if let v = nextVal(), let n = Int(v) { c.grid = max(0, n); i += 1 }
             case "--out":         if let v = nextVal() { c.out = v; i += 1 }
             case "-h", "--help":
                 print("EvoSimSnapshot [--seed N] [--steps N] [--width W] [--height H] [--organisms N] [--food N] [--food-every N] [--trail K] [--trail-every K] [--out path.png]")
@@ -69,6 +73,18 @@ print("[snapshot] seed=\(cli.seed) steps=\(cli.steps) organisms=\(world.colony.o
 // Ring buffer of (cellId, position) frames for trail rendering.
 var trailFrames: [[(UInt32, SIMD3<Float>)]] = []
 
+// Time-lapse grid: if cli.grid > 0, capture grid² snapshots evenly spaced
+// through the run, then tile into a single PNG at the end.
+let gridN = cli.grid
+let gridFrameCount = gridN * gridN
+var gridFrames: [[UInt8]] = []
+let gridFrameInterval: Int = gridFrameCount > 0
+    ? max(1, cli.steps / gridFrameCount)
+    : Int.max
+var nextGridCapture = gridFrameInterval - 1
+let gridFrameSize = max(180, min(cli.width, cli.height) / max(1, gridN))
+let frameRenderer = SnapshotRenderer(width: gridFrameSize, height: gridFrameSize)
+
 let t0 = Date()
 for n in 0..<cli.steps {
     if cli.foodEvery > 0 && n > 0 && n % cli.foodEvery == 0 {
@@ -76,7 +92,7 @@ for n in 0..<cli.steps {
     }
     if cli.selectEvery > 0 && n > 0 && n % cli.selectEvery == 0 {
         let beforeOrg = world.colony.organismCount
-        world.colony.applySelectionPressure(keepFraction: cli.keepFraction)
+        world.colony.applySelectionPressure(keepFraction: cli.keepFraction, motionBias: cli.motionBias)
         if n % (cli.selectEvery * 4) == 0 {
             print("[snapshot] selection @ tick \(n): \(beforeOrg) → keep \(Int(Float(beforeOrg) * cli.keepFraction))")
         }
@@ -89,21 +105,55 @@ for n in 0..<cli.steps {
             trailFrames.removeFirst()
         }
     }
+    if gridFrameCount > 0 && n >= nextGridCapture && gridFrames.count < gridFrameCount {
+        gridFrames.append(frameRenderer.renderRGBA(world))
+        nextGridCapture += gridFrameInterval
+    }
 }
 let wall = Date().timeIntervalSince(t0)
 print(String(format: "[snapshot] %d steps in %.3fs (%.1f steps/s)  organisms=%d  cells=%d  bonds=%d  totalEnergy=%.2f",
              cli.steps, wall, Double(cli.steps) / wall,
              world.colony.organismCount, world.colony.count, world.colony.bonds.count, world.colony.totalEnergy_orZero))
 
-var renderer = SnapshotRenderer(width: cli.width, height: cli.height)
-renderer.trailFrames = trailFrames
 let outURL = URL(fileURLWithPath: cli.out)
-let ok = renderer.writePNG(world, to: outURL)
-if !ok {
-    FileHandle.standardError.write(Data("failed to write \(outURL.path)\n".utf8))
-    exit(1)
+if gridFrameCount > 0 && gridFrames.count == gridFrameCount {
+    // Tile gridN×gridN frames into one big PNG.
+    let tileW = frameRenderer.width
+    let tileH = frameRenderer.height
+    let totalW = tileW * gridN
+    let totalH = tileH * gridN
+    var tiled = [UInt8](repeating: 0, count: totalW * totalH * 4)
+    for fi in 0..<gridFrameCount {
+        let frame = gridFrames[fi]
+        let col = fi % gridN
+        let row = fi / gridN
+        let offsetX = col * tileW
+        let offsetY = row * tileH
+        for py in 0..<tileH {
+            for px in 0..<tileW {
+                let src = 4 * (px + py * tileW)
+                let dst = 4 * ((offsetX + px) + (offsetY + py) * totalW)
+                tiled[dst + 0] = frame[src + 0]
+                tiled[dst + 1] = frame[src + 1]
+                tiled[dst + 2] = frame[src + 2]
+                tiled[dst + 3] = frame[src + 3]
+            }
+        }
+    }
+    if !SnapshotRenderer.writeRGBA8PNG(pixels: tiled, width: totalW, height: totalH, to: outURL) {
+        FileHandle.standardError.write(Data("failed to write \(outURL.path)\n".utf8))
+        exit(1)
+    }
+    print("[snapshot] wrote \(outURL.path) (\(totalW)×\(totalH) — \(gridN)×\(gridN) time-lapse)")
+} else {
+    var renderer = SnapshotRenderer(width: cli.width, height: cli.height)
+    renderer.trailFrames = trailFrames
+    if !renderer.writePNG(world, to: outURL) {
+        FileHandle.standardError.write(Data("failed to write \(outURL.path)\n".utf8))
+        exit(1)
+    }
+    print("[snapshot] wrote \(outURL.path) (\(cli.width)×\(cli.height))")
 }
-print("[snapshot] wrote \(outURL.path) (\(cli.width)×\(cli.height))")
 
 // MARK: - Quick helpers
 extension Colony {
