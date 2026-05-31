@@ -24,6 +24,15 @@ public struct MicroscopyRenderer {
     public var nucleusFrac: Float = 0.28
     /// Cytoplasm noise scale (world units).
     public var cytoNoiseScale: Float = 0.6
+    /// When true, the camera frames the largest organism (by cell count)
+    /// plus padding, so the rendered image is creature-centric rather than
+    /// tank-overview. When false, the whole tank is shown.
+    public var followLargestOrganism: Bool = false
+    /// Padding around the followed organism, in world units.
+    public var followPadding: Float = 6.0
+    /// Minimum framed extent in world units (avoid extreme zoom on a
+    /// single-cell organism).
+    public var minFrameExtent: Float = 14.0
 
     public init(width: Int = 480, height: Int = 480) {
         self.width = width
@@ -41,8 +50,43 @@ public struct MicroscopyRenderer {
         var pixels = [UInt8](repeating: 0, count: w * h * 4)
 
         let bx = world.bounds.x, by = world.bounds.y, bz = world.bounds.z
-        let pxPerUnitX = Float(w) / bx
-        let pxPerUnitY = Float(h) / by
+
+        // Camera viewport: either full tank, or a tight frame around the
+        // largest organism. viewMinX/Y, viewExtentX/Y are in world units.
+        var viewMinX: Float = 0, viewMinY: Float = 0
+        var viewExtentX: Float = bx, viewExtentY: Float = by
+        if followLargestOrganism, !world.colony.cells.isEmpty {
+            // Count cells per organism, pick the most populous.
+            var counts: [UInt32: Int] = [:]
+            for c in world.colony.cells {
+                counts[c.organismId, default: 0] += 1
+            }
+            if let (bestOid, _) = counts.max(by: { $0.value < $1.value }) {
+                var minP = SIMD2<Float>( Float.greatestFiniteMagnitude,  Float.greatestFiniteMagnitude)
+                var maxP = SIMD2<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+                for c in world.colony.cells where c.organismId == bestOid {
+                    minP.x = min(minP.x, c.position.x)
+                    minP.y = min(minP.y, c.position.y)
+                    maxP.x = max(maxP.x, c.position.x)
+                    maxP.y = max(maxP.y, c.position.y)
+                }
+                // Pad + enforce minimum extent + square aspect.
+                var extentX = (maxP.x - minP.x) + followPadding * 2
+                var extentY = (maxP.y - minP.y) + followPadding * 2
+                let side = max(minFrameExtent, max(extentX, extentY))
+                extentX = side; extentY = side
+                let cx = (minP.x + maxP.x) * 0.5
+                let cy = (minP.y + maxP.y) * 0.5
+                viewMinX = cx - extentX * 0.5
+                viewMinY = cy - extentY * 0.5
+                viewExtentX = extentX
+                viewExtentY = extentY
+            }
+        }
+        let pxPerUnitX = Float(w) / viewExtentX
+        let pxPerUnitY = Float(h) / viewExtentY
+        @inline(__always) func wx2px(_ wx: Float) -> Float { (wx - viewMinX) * pxPerUnitX }
+        @inline(__always) func wy2py(_ wy: Float) -> Float { (wy - viewMinY) * pxPerUnitY }
 
         // -----------------------------------------------------------------
         // Background: pale watery wash with subtle fBm so it doesn't look
@@ -76,7 +120,7 @@ public struct MicroscopyRenderer {
         var posById = [UInt32: SIMD2<Float>]()
         posById.reserveCapacity(world.colony.cells.count)
         for c in world.colony.cells {
-            posById[c.id] = SIMD2<Float>(c.position.x * pxPerUnitX, c.position.y * pxPerUnitY)
+            posById[c.id] = SIMD2<Float>(wx2px(c.position.x), wy2py(c.position.y))
         }
         for bond in world.colony.bonds {
             guard let pa = posById[bond.a], let pb = posById[bond.b] else { continue }
@@ -117,8 +161,8 @@ public struct MicroscopyRenderer {
             // farther offset than nucleus.
             let vacRadiusPx = rPx * 0.16
             let vacOffMag = rPx * 0.45
-            let cxF = cell.position.x * pxPerUnitX
-            let cyF = cell.position.y * pxPerUnitY
+            let cxF = wx2px(cell.position.x)
+            let cyF = wy2py(cell.position.y)
             // Depth: front cells slightly larger + brighter. zNorm 0 = back.
             let zNorm = max(0, min(1, cell.position.z / bz))
             let depthScale: Float = 0.85 + 0.3 * zNorm
@@ -200,9 +244,9 @@ public struct MicroscopyRenderer {
                     var col: SIMD3<Float>
                     var alpha: Float = 0.82
 
-                    // Cytoplasm fBm (in world units so it follows the cell).
-                    let wx = (Float(px) / pxPerUnitX) / cytoNoiseScale
-                    let wy = (Float(py) / pxPerUnitY) / cytoNoiseScale
+                    // Cytoplasm fBm in true world coords (respects viewport).
+                    let wx = (viewMinX + Float(px) / pxPerUnitX) / cytoNoiseScale
+                    let wy = (viewMinY + Float(py) / pxPerUnitY) / cytoNoiseScale
                     let cytoN = Self.fbm(wx, wy, cytoSeed, octaves: 3)
                     let cytoLit = cytoBase * (0.82 + cytoN * 0.45)
 
