@@ -29,6 +29,11 @@ public struct Colony {
     /// Parallel to `cells`: normalised mechanical stress (|net bond force|),
     /// fed back to the NCA on the next tick as a proprioceptive input.
     public private(set) var stress: [Float] = []
+    /// Parallel to `cells`: contraction signal from this cell's last NCA
+    /// forward pass. Bonds shorten as a function of their endpoints'
+    /// contraction. The NCA chooses how / when to contract — locomotion has
+    /// to be discovered.
+    public private(set) var contraction: [Float] = []
     public private(set) var nextCellId: UInt32 = 1
     public private(set) var nextOrganismId: UInt32 = 1
 
@@ -39,7 +44,7 @@ public struct Colony {
     public var metabolicCost: Float = 0.035      // energy spent per second just to live
     public var divisionEnergyCost: Float = 0.5   // parent pays this on divide
     public var minDivideEnergy: Float = 1.0      // can't divide if energy below
-    public var maxCells: Int = 6000              // tank hard cap
+    public var maxCells: Int = 2500              // tank hard cap (perf bound)
     public var stateStep: Float = 0.25           // Δstate applied as: s += step * Δ
     public var neighborRadius: Float = 2.2       // for mean-neighbor input
     public var budSpacing: Float = 1.5           // daughter cell offset on divide
@@ -83,6 +88,7 @@ public struct Colony {
         cells.append(c)
         velocities.append(.zero)
         stress.append(0)
+        contraction.append(0)
         return id
     }
 
@@ -201,6 +207,11 @@ public struct Colony {
             let budSig    = outputBuf[stateCh + NCAOutput.budIdx]
             let dieSig    = outputBuf[stateCh + NCAOutput.dieIdx]
 
+            // 2d. Latch the contraction signal so the integrator can use it
+            //     this same tick. tanh output ⇒ [-1, 1]; negative = relax,
+            //     positive = contract.
+            contraction[ci] = outputBuf[stateCh + NCAOutput.contractionIdx]
+
             if dieSig > dieThreshold { deaths.insert(ci); continue }
             if postMetab <= 0 { deaths.insert(ci); continue }
 
@@ -310,9 +321,11 @@ public struct Colony {
             var keptCells: [Cell] = []
             var keptVel: [SIMD3<Float>] = []
             var keptStress: [Float] = []
+            var keptContraction: [Float] = []
             keptCells.reserveCapacity(cells.count - deaths.count)
             keptVel.reserveCapacity(cells.count - deaths.count)
             keptStress.reserveCapacity(cells.count - deaths.count)
+            keptContraction.reserveCapacity(cells.count - deaths.count)
             var deadIds = Set<UInt32>()
             for i in 0..<cells.count {
                 if deaths.contains(i) {
@@ -321,11 +334,13 @@ public struct Colony {
                     keptCells.append(cells[i])
                     keptVel.append(velocities[i])
                     keptStress.append(stress[i])
+                    keptContraction.append(contraction[i])
                 }
             }
             cells = keptCells
             velocities = keptVel
             stress = keptStress
+            contraction = keptContraction
             if !deadIds.isEmpty {
                 bonds.removeAll { deadIds.contains($0.a) || deadIds.contains($0.b) }
             }
@@ -349,6 +364,7 @@ public struct Colony {
                 stress: &stress,
                 bonds: &bonds,
                 idIndex: idIndex,
+                contraction: contraction,
                 bounds: bounds,
                 dt: dt
             )

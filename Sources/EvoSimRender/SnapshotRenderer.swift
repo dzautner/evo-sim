@@ -20,6 +20,9 @@ public struct SnapshotRenderer {
     public var nutrientGain: Float
     public var cellRadiusPx: Float
     public var drawBonds: Bool = true
+    /// Optional motion trail: oldest → newest frames of (cellId, position).
+    /// Rendered behind cells as fading dots so locomotion shows in a still.
+    public var trailFrames: [[(UInt32, SIMD3<Float>)]] = []
 
     public enum SliceMode {
         /// Integrate concentration along the Z axis. Gives an X-ray look.
@@ -129,6 +132,28 @@ public struct SnapshotRenderer {
             Float(ny) * cf.cellSize
         )
         let pxPerUnit = SIMD2<Float>(Float(w) / worldExtent.x, Float(h) / worldExtent.y)
+
+        // 3-trail. Motion trails (oldest → newest) behind everything.
+        if !trailFrames.isEmpty {
+            let n = trailFrames.count
+            for (k, frame) in trailFrames.enumerated() {
+                let age = Float(n - k) / Float(n)        // 1 = oldest, → 0 newest
+                let alpha = max(0.04, (1 - age) * 0.45)  // fade older
+                let r: Float = 0.95, g: Float = 0.75, b: Float = 0.35
+                for (_, pos) in frame {
+                    let x = pos.x * pxPerUnit.x
+                    let y = pos.y * pxPerUnit.y
+                    blendPixel(into: &pixels, w: w, h: h, x: x, y: y,
+                               color: SIMD3<Float>(r, g, b), alpha: alpha)
+                    // Tiny soft halo to make trails readable at small sizes.
+                    let halfA = alpha * 0.4
+                    blendPixel(into: &pixels, w: w, h: h, x: x + 1, y: y, color: SIMD3<Float>(r, g, b), alpha: halfA)
+                    blendPixel(into: &pixels, w: w, h: h, x: x - 1, y: y, color: SIMD3<Float>(r, g, b), alpha: halfA)
+                    blendPixel(into: &pixels, w: w, h: h, x: x, y: y + 1, color: SIMD3<Float>(r, g, b), alpha: halfA)
+                    blendPixel(into: &pixels, w: w, h: h, x: x, y: y - 1, color: SIMD3<Float>(r, g, b), alpha: halfA)
+                }
+            }
+        }
 
         // 3a. Bonds first, behind cells.
         if drawBonds, !world.colony.bonds.isEmpty {

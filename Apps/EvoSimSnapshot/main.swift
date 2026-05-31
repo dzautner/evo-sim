@@ -4,10 +4,14 @@ import EvoSimCore
 import EvoSimRender
 
 // CLI: run the sim for N steps from a seed, write a PNG snapshot.
+// Optional trail: capture each cell's last K positions, render them as
+// fading dots behind the live cells so locomotion is visible in a still.
+//
 // Usage:
 //   swift run EvoSimSnapshot [--seed N] [--steps N] [--out path.png]
 //                            [--width N] [--height N] [--organisms N]
 //                            [--food N] [--food-every N]
+//                            [--trail K] [--trail-every K]
 
 struct CLI {
     var seed: UInt64 = 0xC0FFEE
@@ -16,7 +20,9 @@ struct CLI {
     var height: Int = 720
     var initialOrganisms: Int = 24
     var foodPerSprinkle: Int = 8
-    var foodEvery: Int = 180   // ticks between sprinkles
+    var foodEvery: Int = 180
+    var trailFrames: Int = 0     // 0 = off
+    var trailEvery: Int = 6      // capture every N ticks (so trail covers trailFrames * trailEvery ticks)
     var out: String = "snapshot.png"
 
     static func parse(_ args: [String]) -> CLI {
@@ -33,9 +39,11 @@ struct CLI {
             case "--organisms":   if let v = nextVal(), let n = Int(v) { c.initialOrganisms = n; i += 1 }
             case "--food":        if let v = nextVal(), let n = Int(v) { c.foodPerSprinkle = n; i += 1 }
             case "--food-every":  if let v = nextVal(), let n = Int(v) { c.foodEvery = n; i += 1 }
+            case "--trail":       if let v = nextVal(), let n = Int(v) { c.trailFrames = n; i += 1 }
+            case "--trail-every": if let v = nextVal(), let n = Int(v) { c.trailEvery = max(1, n); i += 1 }
             case "--out":         if let v = nextVal() { c.out = v; i += 1 }
             case "-h", "--help":
-                print("EvoSimSnapshot [--seed N] [--steps N] [--width W] [--height H] [--organisms N] [--food N] [--food-every N] [--out path.png]")
+                print("EvoSimSnapshot [--seed N] [--steps N] [--width W] [--height H] [--organisms N] [--food N] [--food-every N] [--trail K] [--trail-every K] [--out path.png]")
                 exit(0)
             default:
                 FileHandle.standardError.write(Data("unknown arg: \(a)\n".utf8))
@@ -49,13 +57,13 @@ struct CLI {
 let cli = CLI.parse(CommandLine.arguments)
 
 var world = World(seed: cli.seed)
-
-// Initial seeding: K random organisms scattered across the tank + a starter
-// pulse of food. From here on, evolution does its thing.
 world.seedRandomOrganisms(count: cli.initialOrganisms)
 world.sprinkleFood(count: cli.foodPerSprinkle, amount: 220, sigma: 4.5)
 
 print("[snapshot] seed=\(cli.seed) steps=\(cli.steps) organisms=\(world.colony.organismCount) cells=\(world.colony.count)")
+
+// Ring buffer of (cellId, position) frames for trail rendering.
+var trailFrames: [[(UInt32, SIMD3<Float>)]] = []
 
 let t0 = Date()
 for n in 0..<cli.steps {
@@ -63,13 +71,21 @@ for n in 0..<cli.steps {
         world.sprinkleFood(count: cli.foodPerSprinkle, amount: 220, sigma: 4.5)
     }
     world.tick()
+    if cli.trailFrames > 0 && n % cli.trailEvery == 0 {
+        let frame = world.colony.cells.map { ($0.id, $0.position) }
+        trailFrames.append(frame)
+        if trailFrames.count > cli.trailFrames {
+            trailFrames.removeFirst()
+        }
+    }
 }
 let wall = Date().timeIntervalSince(t0)
-print(String(format: "[snapshot] %d steps in %.3fs (%.1f steps/s)  organisms=%d  cells=%d  totalEnergy=%.2f",
+print(String(format: "[snapshot] %d steps in %.3fs (%.1f steps/s)  organisms=%d  cells=%d  bonds=%d  totalEnergy=%.2f",
              cli.steps, wall, Double(cli.steps) / wall,
-             world.colony.organismCount, world.colony.count, world.totalEnergy))
+             world.colony.organismCount, world.colony.count, world.colony.bonds.count, world.colony.totalEnergy_orZero))
 
-let renderer = SnapshotRenderer(width: cli.width, height: cli.height)
+var renderer = SnapshotRenderer(width: cli.width, height: cli.height)
+renderer.trailFrames = trailFrames
 let outURL = URL(fileURLWithPath: cli.out)
 let ok = renderer.writePNG(world, to: outURL)
 if !ok {
@@ -77,3 +93,12 @@ if !ok {
     exit(1)
 }
 print("[snapshot] wrote \(outURL.path) (\(cli.width)×\(cli.height))")
+
+// MARK: - Quick helpers
+extension Colony {
+    var totalEnergy_orZero: Double {
+        var s = 0.0
+        for c in cells { s += Double(c.energy) }
+        return s
+    }
+}

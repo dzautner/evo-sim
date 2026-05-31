@@ -12,17 +12,26 @@ public struct SoftBodyIntegrator {
     public var boundaryStiffness: Float = 6.0
     public var maxVelocity: Float = 8.0    // clamp for stability
     public var breakStretchRatio: Float = 3.5
+    /// Max fractional contraction of a bond at full +1 contraction signal
+    /// from both endpoints. Bound by physics — myocytes contract ~30%, but
+    /// we push higher (55%) so coordinated motion is reachable within tens
+    /// of generations rather than thousands.
+    public var maxContractionFraction: Float = 0.55
 
     public init() {}
 
-    /// Returns (forces removed by bonds, indices of bonds that broke this tick).
-    /// Mutates positions, velocities, and stress in place.
+    /// Mutates positions, velocities, and stress in place. `contraction` (per
+    /// cell, range [-1, +1]) modulates each bond's effective rest length:
+    ///     effL = restLength * (1 - maxContractionFraction * mean(cA, cB)+)
+    /// Negative contraction (relaxation) is clamped to 0 — relaxed bonds use
+    /// their nominal rest length, not a longer one.
     public func integrate(
         positions: inout [SIMD3<Float>],
         velocities: inout [SIMD3<Float>],
         stress: inout [Float],
         bonds: inout [Bond],
         idIndex: [UInt32: Int],
+        contraction: [Float],
         bounds: SIMD3<Float>,
         dt: Float
     ) {
@@ -51,7 +60,14 @@ public struct SoftBodyIntegrator {
                 continue
             }
             let dir = dp / dist
-            let stretch = dist - bond.restLength
+            // Modulate rest length by the mean positive contraction of the
+            // two endpoint cells. Cells with positive contraction signal
+            // shorten the bonds they're part of → muscle.
+            let cA = max(0, contraction[ia])
+            let cB = max(0, contraction[ib])
+            let contract = (cA + cB) * 0.5 * maxContractionFraction
+            let effRest = bond.restLength * (1 - contract)
+            let stretch = dist - effRest
             let springF = -bond.stiffness * stretch * dir
             let relVel = velocities[ia] - velocities[ib]
             let dampF = -bond.damping * simd_dot(relVel, dir) * dir
