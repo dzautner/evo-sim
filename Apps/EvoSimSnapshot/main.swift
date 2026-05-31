@@ -28,7 +28,7 @@ struct CLI {
     var motionBias: Float = 0.0  // selection: how much to weight displacement
     var grid: Int = 0            // 0 = single image; >0 = N×N grid time-lapse
     var gifFrames: Int = 0       // 0 = off; >0 = capture this many GIF frames
-    var gifDelay: Double = 0.06  // seconds between frames (1/15s default)
+    var gifDelay: Double = 0.05  // seconds between frames (1/20s)
     var out: String = "snapshot.png"
 
     static func parse(_ args: [String]) -> CLI {

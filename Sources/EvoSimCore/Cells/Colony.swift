@@ -82,7 +82,11 @@ public struct Colony {
     // for selection to act on. Death stays conservative so accidental
     // self-extinction is rare.
     public var divideThreshold: Float = 0.0
-    public var budThreshold: Float = 0.35
+    /// Budding splits the lineage into a new organism (mutated genome).
+    /// Set high by default so most divisions are within-organism — bodies
+    /// grow as one cohesive creature instead of fragmenting into a swarm
+    /// of singletons.
+    public var budThreshold: Float = 0.85
     public var dieThreshold: Float = 0.85
 
     // Per-cell scratch buffers — sized for current genome shape.
