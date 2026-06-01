@@ -94,9 +94,13 @@ public struct MicroscopyRenderer {
 
         // ---------------- TEM background ----------------
         // Pale warm-ivory, with heavy fBm "film" grain and a slight
-        // sepia tint variation across the frame.
+        // sepia tint variation across the frame. Also samples the
+        // nutrient + morphogen fields so food pellets show as faint
+        // amber blotches and morphogen signaling as faint cool tint.
         let bgPale = SIMD3<Float>(0.84, 0.81, 0.76)
         let bgShadow = SIMD3<Float>(0.70, 0.66, 0.60)
+        let foodTint = SIMD3<Float>(0.80, 0.62, 0.32)
+        let morphoTint = SIMD3<Float>(0.45, 0.55, 0.68)
         for py in 0..<h {
             for px in 0..<w {
                 let u = Float(px) / Float(w)
@@ -105,7 +109,20 @@ public struct MicroscopyRenderer {
                 let n1 = Self.valueNoise(u * 3.1, v * 3.1, 0x10)
                 let n2 = Self.valueNoise(u * 11.0, v * 11.0, 0x21) * 0.55
                 let nMix = max(0, min(1, 0.35 + (n1 + n2 - 0.7) * 1.1))
-                let bg = mix(bgPale, bgShadow, t: nMix)
+                var bg = mix(bgPale, bgShadow, t: nMix)
+                // Sample chemistry + morphogen at the world position this
+                // pixel corresponds to (respects viewport).
+                let wx = viewMinX + u * viewExtentX
+                let wy = viewMinY + v * viewExtentY
+                // Sum chemistry along z=middle slice for performance.
+                if let g = world.chemistry.gridIndex(for: SIMD3<Float>(wx, wy, world.bounds.z * 0.5)) {
+                    let nut = world.chemistry.sample(at: g.i, g.j, g.k)
+                    let nutT = min(0.45, nut * 0.025)
+                    bg = mix(bg, foodTint, t: nutT)
+                    let mor = world.morphogen.sample(at: g.i, g.j, g.k)
+                    let morT = min(0.35, mor * 0.04)
+                    bg = mix(bg, morphoTint, t: morT)
+                }
                 let idx = 4 * (px + py * w)
                 pixels[idx + 0] = toByte(bg.x)
                 pixels[idx + 1] = toByte(bg.y)
