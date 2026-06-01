@@ -165,28 +165,33 @@ public struct Colony {
             stats[oid] = s
         }
 
-        let scored: [(UInt32, Float)] = stats.values.map { s in
+        // Compute TWO fitness scores per organism. The selection budget is
+        // split so half the survivors come from each ranking — this stops
+        // selection from converging the whole population to one strategy
+        // (all-predator monoculture) and instead preserves both predators
+        // and prey lineages → mixed ecosystem.
+        struct Scored { let oid: UInt32; let predatorFit: Float; let preyFit: Float }
+        let scored: [Scored] = stats.values.map { s in
             let age = organisms[s.oid]?.ageTicks ?? 1
             let avgE = s.totalEnergy / Float(s.cellCount)
             let survivalFitness = Float(s.cellCount) * avgE * sqrt(Float(age) + 1)
-            // Motion fitness.
             let disp = organisms[s.oid]?.totalDisplacement ?? 0
             let speed = disp / max(1, Float(age))
             let motion = speed * motionBias * Float(s.cellCount)
-            // Chemotaxis: bonus for being in a nutrient-rich grid cell.
             var chemo: Float = 0
             if chemotaxisBias > 0, let cf = chemistry,
                let g = cf.gridIndex(for: s.meanPos) {
                 let local = cf.sample(at: g.i, g.j, g.k)
                 chemo = local * chemotaxisBias * Float(s.cellCount)
             }
-            // Predation success: cumulative energy drained from other orgs.
             let drained = organisms[s.oid]?.totalDrained ?? 0
             let predationFit = drained * predationBias
-            // Co-evolution proximity term:
-            //   - predators (high drained) → bonus for being near other orgs
-            //   - prey (low drained)       → bonus for distance from others
-            var chase: Float = 0
+
+            // Chase term split: predators only get the proximity reward,
+            // prey only get the distance reward. So both can win in their
+            // own niche.
+            var predProximity: Float = 0
+            var preyDistance: Float = 0
             if chaseBias > 0 {
                 var nearestD2: Float = .greatestFiniteMagnitude
                 for other in stats.values where other.oid != s.oid {
@@ -196,21 +201,24 @@ public struct Colony {
                 }
                 if nearestD2 < .greatestFiniteMagnitude {
                     let nearestD = nearestD2.squareRoot()
-                    // Higher drained → more "predator-y", wants small distance.
-                    let predator01 = min(1, drained * 0.05)
-                    // chase = chaseBias × (predator wants short / prey wants long)
-                    let proximityReward = 1.0 / (1 + nearestD * 0.2)  // near = bigger
-                    let distanceReward = nearestD * 0.05              // far = bigger
-                    chase = chaseBias * (predator01 * proximityReward
-                                         + (1 - predator01) * distanceReward)
-                    chase *= Float(s.cellCount)
+                    predProximity = chaseBias * (1.0 / (1 + nearestD * 0.2)) * Float(s.cellCount)
+                    preyDistance  = chaseBias * (nearestD * 0.05) * Float(s.cellCount)
                 }
             }
-            return (s.oid, survivalFitness + motion + chemo + predationFit + chase)
-        }.sorted { $0.1 > $1.1 }
 
-        let keep = max(2, Int(Float(scored.count) * keepFraction))
-        let survivors = Set(scored.prefix(keep).map { $0.0 })
+            let predatorFit = survivalFitness + motion + chemo + predationFit + predProximity
+            let preyFit     = survivalFitness + motion + chemo + preyDistance
+            return Scored(oid: s.oid, predatorFit: predatorFit, preyFit: preyFit)
+        }
+
+        let totalKeep = max(4, Int(Float(scored.count) * keepFraction))
+        let predKeep = totalKeep / 2
+        let preyKeep = totalKeep - predKeep
+        let predRanked = scored.sorted { $0.predatorFit > $1.predatorFit }
+        let preyRanked = scored.sorted { $0.preyFit > $1.preyFit }
+        var survivors = Set<UInt32>()
+        for s in predRanked.prefix(predKeep) { survivors.insert(s.oid) }
+        for s in preyRanked.prefix(preyKeep) { survivors.insert(s.oid) }
 
         // Kill cells whose organism didn't survive selection.
         for i in 0..<cells.count where !survivors.contains(cells[i].organismId) {
