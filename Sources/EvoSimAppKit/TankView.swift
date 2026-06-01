@@ -136,17 +136,17 @@ public final class TankViewModel: ObservableObject {
             ticksSinceFoodSprinkle = 0
         }
 
-        if ticksSinceSelection >= 1800 && world.colony.organismCount > 8 {
+        if ticksSinceSelection >= 2200 && world.colony.organismCount > 10 {
             let before = world.colony.organismCount
             world.colony.applySelectionPressure(
-                keepFraction: 0.5,
-                motionBias: 20,
-                chemotaxisBias: 0.4,
-                predationBias: 6,
-                chaseBias: 12,
+                keepFraction: 0.6,
+                motionBias: 12,
+                chemotaxisBias: 0.5,
+                predationBias: 2.5,
+                chaseBias: 4,
                 chemistry: world.chemistry
             )
-            lastEvent = "selection: \(before) → top \(Int(Float(before) * 0.5))"
+            lastEvent = "selection: \(before) → top \(Int(Float(before) * 0.6))"
             ticksSinceSelection = 0
         }
 
