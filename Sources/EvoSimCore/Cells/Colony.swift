@@ -573,10 +573,16 @@ public struct Colony {
         }
         // Chemotaxis force: cells drift toward local nutrient gradient.
         // Sampled from the nutrient field via central differences.
+        // Cells whose NCA is currently signalling predation get an
+        // amplified chemotaxis pull — they head toward food more
+        // aggressively. Since prey also gather at food, this produces
+        // indirect pursuit without any hardcoded prey-targeting.
         if chemotaxisForce > 0 {
             for i in 0..<cells.count {
                 let (_, gx, gy, gz) = sampleChemistryAt(cells[i].position, in: chemistry)
-                externalForces[i] += SIMD3<Float>(gx, gy, gz) * chemotaxisForce
+                let pred = predation.indices.contains(i) ? max(0, predation[i]) : 0
+                let boost: Float = 1.0 + pred * 2.0   // up to 3× for full-predator cells
+                externalForces[i] += SIMD3<Float>(gx, gy, gz) * (chemotaxisForce * boost)
             }
         }
         if cells.count > 1 {
