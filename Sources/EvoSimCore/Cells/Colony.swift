@@ -571,6 +571,14 @@ public struct Colony {
                 )
             }
         }
+        // Chemotaxis force: cells drift toward local nutrient gradient.
+        // Sampled from the nutrient field via central differences.
+        if chemotaxisForce > 0 {
+            for i in 0..<cells.count {
+                let (_, gx, gy, gz) = sampleChemistryAt(cells[i].position, in: chemistry)
+                externalForces[i] += SIMD3<Float>(gx, gy, gz) * chemotaxisForce
+            }
+        }
         if cells.count > 1 {
             // Rebuild index using up-to-date positions (births/deaths happened).
             let positions = cells.map { $0.position }
@@ -696,6 +704,11 @@ public struct Colony {
     /// motion. This is physics, not behaviour: the same baseline applies
     /// to every cell regardless of genome.
     public var ciliaStrength: Float = 0.45
+    /// Bacterial chemotaxis: a small physical force on each cell toward
+    /// the local nutrient gradient. Real microorganisms do this via
+    /// flagellar response to chemical gradients — it's a property of the
+    /// medium + cell membrane, not an evolved trait.
+    public var chemotaxisForce: Float = 6.0
 
     // MARK: - Helpers
 
