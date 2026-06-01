@@ -22,6 +22,10 @@ public final class TankViewModel: ObservableObject {
     @Published public var isPaused: Bool = false
     @Published public private(set) var bakedImage: CGImage?
     @Published public private(set) var lastEvent: String = ""
+    /// Rolling predation-events-per-second window.
+    @Published public private(set) var predationRate: Double = 0
+    private var predationRollingWindow: [Int] = []  // events per pump tick
+    private let predationWindowSize = 60
 
     private var lastHostTime: CFTimeInterval = 0
     private var accumulator: Double = 0
@@ -98,16 +102,26 @@ public final class TankViewModel: ObservableObject {
         if !isPaused {
             accumulator += dt * speedMultiplier
             var stepped = 0
+            var predationsThisPump = 0
             while accumulator >= world.fixedDt && stepped < maxStepsPerPump {
                 runScheduledEvents()
                 if simd_length(currentDirection) > 1e-4 {
                     world.applyCurrent(currentDirection, strength: 0.6)
                 }
                 world.tick()
+                predationsThisPump += world.colony.recentPredations.filter { $0.age == 0 }.count
                 accumulator -= world.fixedDt
                 stepped += 1
             }
             if stepped == maxStepsPerPump { accumulator = 0 }
+            predationRollingWindow.append(predationsThisPump)
+            if predationRollingWindow.count > predationWindowSize {
+                predationRollingWindow.removeFirst()
+            }
+            let totalEvents = predationRollingWindow.reduce(0, +)
+            // Window covers ~predationWindowSize pump frames at ~60Hz.
+            let windowSeconds = Double(predationRollingWindow.count) / 60.0
+            predationRate = windowSeconds > 0 ? Double(totalEvents) / windowSeconds : 0
         }
         // Re-bake at ~10 Hz independent of sim speed.
         let pxBuf = renderer.renderRGBA(world)
@@ -236,6 +250,8 @@ public struct TankView: View {
             Text(String(format: "speed %.0fx", vm.speedMultiplier))
             Text("orgs  \(vm.world.colony.organismCount)")
             Text("cells \(vm.world.colony.count)")
+            Text(String(format: "hunt  %.1f /s", vm.predationRate))
+                .foregroundStyle(vm.predationRate > 0.5 ? .red.opacity(0.85) : .green.opacity(0.6))
             if !vm.lastEvent.isEmpty {
                 Text(vm.lastEvent)
                     .foregroundStyle(.yellow.opacity(0.85))
